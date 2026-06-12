@@ -27,6 +27,8 @@ Resolves a GitHub pull request with `gh pr view`, compares the PR author to the 
 
 Both modes require the agent to build suggestions from three read-only lanes in parallel before acting: `vette`, naming/test-name checks, and `thermo-nuclear-code-quality-review`. The merged suggestion set keeps lane provenance such as `[vette]`, `[name-check]`, or `[thermo-nuclear]`.
 
+Each run also writes a local temporary findings artifact under the PR branch name, for example `/tmp/pi-vette-findings/<branch>/pr-123-findings.md`. The artifact records every candidate finding from every lane, including verified, rejected, duplicate, out-of-scope, test-reproduced, untestable, and blocked items, so later runs can reference the full review history.
+
 ### `/pr [pr|branch|url] [--post-comments] [--no-watch]`
 
 Prepares and babysits a PR:
@@ -56,6 +58,6 @@ When the agent finishes, the status returns to idle.
 
 ## Safety defaults
 
-- `/vette` external-review mode automatically posts only verified findings to the PR after verification and cleanup are complete; unverified suggestions are reported but not posted.
+- `/vette` external-review mode automatically posts only verified findings to the PR after verification and cleanup are complete; unverified suggestions are recorded in the local findings artifact but not posted.
 - Owner PR repairs protect pre-existing dirty worktree changes.
 - Focused subagents are required for non-trivial TDD, CI, review, and merge-conflict work.
