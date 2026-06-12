@@ -1,7 +1,7 @@
 {
-  "name": "pi-pr-vette-commands",
+  "name": "the-watch",
   "version": "0.1.0",
-  "description": "Pi package that adds PR-aware /vette and /pr commands.",
+  "description": "Pi package that guards PRs with PR-aware /vette and /pr commands.",
   "type": "module",
   "keywords": [
     "pi-package"

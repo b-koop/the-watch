@@ -1,6 +1,6 @@
-# Pi PR/Vette Commands
+# The Watch
 
-Reusable local Pi package that adds PR-aware `/vette` and `/pr` commands.
+Reusable local Pi package that guards pull requests with PR-aware `/vette` and `/pr` commands.
 
 ## Install or test
 
@@ -13,7 +13,7 @@ pi -e .
 Or install as a local package:
 
 ```bash
-pi install /Users/benjaminkoop/code/pi/pr-review
+pi install /Users/benjaminkoop/code/pi/the-watch
 ```
 
 ## Commands
