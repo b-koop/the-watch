@@ -1,0 +1,27 @@
+{
+  "name": "pi-pr-vette-commands",
+  "version": "0.1.0",
+  "description": "Pi package that adds PR-aware /vette and /pr commands.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^25.9.2",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
