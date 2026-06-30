@@ -1,6 +1,7 @@
 # The Watch
 
-Reusable local Pi package that guards pull requests with PR-aware `/vette` and `/pr` commands.
+Reusable local Pi package that guards pull requests with PR-aware `/vette` and
+`/pr` commands.
 
 ## Install or test
 
@@ -18,26 +19,64 @@ pi install /Users/benjaminkoop/code/pi/the-watch
 
 ## Commands
 
-### `/vette [pr|branch|url] [--post-comments]`
+### `/vette [pr|branch|url|scope] [--scope] [--post-comments]`
 
-Resolves a GitHub pull request with `gh pr view`, compares the PR author to the authenticated `gh api user --jq .login`, then dispatches the right agent workflow:
+Resolves a GitHub pull request with `gh pr view`, compares the PR author to the
+authenticated `gh api user --jq .login`, then dispatches the right agent
+workflow. If the selector is not a PR number or URL and cannot be resolved as a
+PR, `/vette` treats it as a broader scope such as a service, module, package,
+directory, route group, job, or subsystem. Use `--scope` to force scope mode;
+`/vette --scope` audits the current worktree.
 
-- **Owner PR**: repair mode. It does not draft/post comments; it asks the agent to run vette/pr-review style investigation and repair confirmed findings with TDD-focused subagents.
-- **External PR**: review mode. It asks the agent to verify findings locally, then post verified items in one final posting pass using stable markdown templates. Test-reproducible findings are posted at the most precise target available: file/line when possible, file-level when line placement is not possible, or a general PR comment as fallback. When a finding can be reproduced with a focused unit/regression test, the agent builds the failing repro test and includes that test code in the associated templated comment body. Verified-but-untestable items are grouped into one final templated PR comment with file/line context wherever possible.
+- **Owner PR**: repair mode. It does not draft/post comments; it asks the agent
+  to run vette/pr-review style investigation and repair confirmed findings with
+  TDD-focused subagents.
+- **External PR**: review mode. It asks the agent to verify findings locally,
+  then post verified items in one final posting pass using stable markdown
+  templates. Test-reproducible findings are posted at the most precise target
+  available: file/line when possible, file-level when line placement is not
+  possible, or a general PR comment as fallback. When a finding can be reproduced
+  with a focused unit/regression test, the agent builds the failing repro test
+  and includes that test code in the associated templated comment body.
+  Verified-but-untestable items are grouped into one final templated PR comment
+  with file/line context wherever possible.
+- **Scope bug-discovery mode**: audits the requested scope, validates candidate
+  bugs with evidence, builds focused failing repro tests where practical, and
+  writes local Markdown bug-ticket drafts under `/tmp/pi-vette-bug-drafts/<scope>/`.
+  It does not create tracker tickets, GitHub issues, PR comments, commits, or
+  production-code fixes.
 
-Both modes require the agent to build suggestions from three read-only lanes in parallel before acting: `vette`, naming/test-name checks, and `thermo-nuclear-code-quality-review`. The merged suggestion set keeps lane provenance such as `[vette]`, `[name-check]`, or `[thermo-nuclear]`.
+All modes require the agent to build suggestions from three read-only lanes in
+parallel before acting: `vette`, naming/test-name checks, and
+`thermo-nuclear-code-quality-review`. The merged suggestion set keeps lane
+provenance such as `[vette]`, `[name-check]`, or `[thermo-nuclear]`.
 
-Each run also writes a local temporary findings artifact under the PR branch name, for example `/tmp/pi-vette-findings/<branch>/pr-123-findings.md`. The artifact records every candidate finding from every lane, including verified, rejected, duplicate, out-of-scope, test-reproduced, untestable, and blocked items, so later runs can reference the full review history.
+PR runs also write a local temporary findings artifact under the PR branch name,
+for example `/tmp/pi-vette-findings/<branch>/pr-123-findings.md`. Scope runs
+write findings and bug-ticket drafts under `/tmp/pi-vette-bug-drafts/<scope>/`.
+These artifacts record every candidate finding from every lane, including
+verified, rejected, duplicate, out-of-scope, test-reproduced, untestable, and
+blocked items, so later runs can reference the full review history.
 
 ### `/pr [pr|branch|url] [--post-comments] [--no-watch]`
 
-Prepares and babysits a PR:
+Vettes the current branch, creates a PR when one does not already exist, then
+babysits the PR. The selector is optional: without a PR number, branch, or URL,
+`/pr` first tries the current branch's existing PR; if none is found, it
+prepares the current branch for PR creation.
 
+- validates the working branch and target base before creating or checking a PR,
+- runs parallel vette, name-check, and thermo-nuclear suggestion lanes before PR
+  creation when needed,
+- fixes confirmed owner-side branch issues with focused TDD/code subagents before
+  creating the PR,
+- creates the PR with `gh pr create` when no existing PR was resolved,
 - validates target branch, title, body, and PR template expectations,
-- runs parallel vette, name-check, and thermo-nuclear suggestion lanes,
-- runs the same PR-aware `/vette` behavior internally, including automatic posting of verified external-PR findings,
+- runs the same PR-aware `/vette` behavior internally, including automatic
+  posting of verified external-PR findings after a PR exists,
 - resolves related merge conflicts,
-- monitors `gh pr checks`, comments, bot feedback, review state, and branch changes,
+- monitors `gh pr checks`, comments, bot feedback, review state, and branch
+  changes,
 - fixes related failures with focused TDD/code subagents,
 - retries unrelated flaky CI once when safe,
 - reports visible status and 15-minute watch timing while working.
@@ -52,12 +91,19 @@ When the agent finishes, the status returns to idle.
 
 ## Requirements
 
-- GitHub CLI (`gh`) authenticated with `gh auth login`.
-- Run inside a git checkout with a PR, or pass a PR number/branch/URL.
+- GitHub CLI (`gh`) authenticated with `gh auth login` for PR modes.
+- Run inside a git checkout on a named branch. `/pr` can create a PR for the
+  current branch when no existing PR is found. `/vette` can review an existing PR
+  or audit a broader scope for local bug-ticket drafts.
 - Pi with extension support.
 
 ## Safety defaults
 
-- `/vette` external-review mode automatically posts only verified findings to the PR after verification and cleanup are complete; unverified suggestions are recorded in the local findings artifact but not posted.
+- `/vette` external-review mode automatically posts only verified findings to the
+  PR after verification and cleanup are complete; unverified suggestions are
+  recorded in the local findings artifact but not posted.
+- `/vette` scope mode never posts or creates tracker tickets; it writes local bug
+  draft Markdown files only.
 - Owner PR repairs protect pre-existing dirty worktree changes.
-- Focused subagents are required for non-trivial TDD, CI, review, and merge-conflict work.
+- Focused subagents are required for non-trivial TDD, CI, review, and
+  merge-conflict work.

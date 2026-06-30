@@ -34,9 +34,35 @@ type PrContext = {
 	dirtyStatus: string;
 };
 
+type DraftPrContext = {
+	branch: string;
+	baseBranch: string;
+	viewer: string;
+	dirtyStatus: string;
+	remoteUrl: string;
+};
+
+type PrCommandContext =
+	| { kind: "existing"; prContext: PrContext }
+	| { kind: "draft"; draftContext: DraftPrContext; resolveError: string };
+
+type ScopeVetteContext = {
+	target: string;
+	branch: string;
+	baseBranch: string;
+	dirtyStatus: string;
+	draftsDir: string;
+	findingsPath: string;
+	resolveError: string;
+};
+
+type VetteCommandContext =
+	| { kind: "pr"; prContext: PrContext }
+	| { kind: "scope"; scopeContext: ScopeVetteContext };
+
 type CommandStatus = {
 	command: "vette" | "pr";
-	prNumber: number;
+	target: string;
 	mode: string;
 	phase: "working" | "queued" | "idle" | "blocked";
 	progress: string;
@@ -62,19 +88,25 @@ function shellQuote(value: string): string {
 
 function parseArgs(args: string): {
 	selector: string;
+	scopeTarget: string;
 	wantsPosting: boolean;
+	wantsScope: boolean;
 	wantsWatch: boolean;
 	raw: string;
 } {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	const flags = new Set(tokens.filter((token) => token.startsWith("--")));
-	const selector = tokens.find((token) => !token.startsWith("--")) ?? "";
+	const positional = tokens.filter((token) => !token.startsWith("--"));
+	const selector = positional[0] ?? "";
+	const wantsScope = flags.has("--scope") || flags.has("--service");
 	return {
 		selector,
+		scopeTarget: positional.join(" ") || (wantsScope ? "." : ""),
 		wantsPosting:
 			flags.has("--post-comments") ||
 			flags.has("--post") ||
 			flags.has("--submit-review"),
+		wantsScope,
 		wantsWatch: !flags.has("--no-watch"),
 		raw: args.trim(),
 	};
@@ -109,6 +141,141 @@ async function getDirtyStatus(cwd: string): Promise<string> {
 	}
 }
 
+async function getViewer(cwd: string): Promise<string> {
+	try {
+		return await run("gh", ["api", "user", "--jq", ".login"], cwd);
+	} catch (error) {
+		throw new Error(
+			`GitHub authentication is required to prepare pull requests. Run \`gh auth login\` and retry.\n\n${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+async function getCurrentBranch(cwd: string): Promise<string> {
+	const branch = await run("git", ["branch", "--show-current"], cwd);
+	if (!branch) {
+		throw new Error(
+			"This workflow must run from a named git branch, not detached HEAD.",
+		);
+	}
+	return branch;
+}
+
+async function getDefaultBaseBranch(cwd: string): Promise<string> {
+	try {
+		const originHead = await run(
+			"git",
+			["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+			cwd,
+		);
+		return originHead.replace(/^origin\//, "") || "main";
+	} catch {
+		return "main";
+	}
+}
+
+async function getOriginRemoteUrl(cwd: string): Promise<string> {
+	try {
+		return await run("git", ["remote", "get-url", "origin"], cwd);
+	} catch {
+		return "<unavailable>";
+	}
+}
+
+async function resolveDraftPrContext(cwd: string): Promise<DraftPrContext> {
+	const [branch, baseBranch, viewer, dirtyStatus, remoteUrl] =
+		await Promise.all([
+			getCurrentBranch(cwd),
+			getDefaultBaseBranch(cwd),
+			getViewer(cwd),
+			getDirtyStatus(cwd),
+			getOriginRemoteUrl(cwd),
+		]);
+
+	return { branch, baseBranch, viewer, dirtyStatus, remoteUrl };
+}
+
+async function resolvePrCommandContext(
+	selector: string,
+	cwd: string,
+): Promise<PrCommandContext> {
+	try {
+		return {
+			kind: "existing",
+			prContext: await resolvePrContext(selector, cwd),
+		};
+	} catch (error) {
+		if (selector) throw error;
+		return {
+			kind: "draft",
+			draftContext: await resolveDraftPrContext(cwd),
+			resolveError: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+function isLikelyPrSelector(selector: string): boolean {
+	return /^#?\d+$/.test(selector) || /^https?:\/\//i.test(selector);
+}
+
+async function resolveScopeVetteContext(
+	target: string,
+	resolveError: string,
+	cwd: string,
+): Promise<ScopeVetteContext> {
+	const [branch, baseBranch, dirtyStatus] = await Promise.all([
+		getCurrentBranch(cwd),
+		getDefaultBaseBranch(cwd),
+		getDirtyStatus(cwd),
+	]);
+	const slug = slugifyBranch(target, "scope");
+	const draftsDir = `/tmp/pi-vette-bug-drafts/${slug}`;
+	return {
+		target,
+		branch,
+		baseBranch,
+		dirtyStatus,
+		draftsDir,
+		findingsPath: `${draftsDir}/findings.md`,
+		resolveError,
+	};
+}
+
+async function resolveVetteCommandContext(
+	parsed: ReturnType<typeof parseArgs>,
+	cwd: string,
+): Promise<VetteCommandContext> {
+	if (parsed.wantsScope) {
+		return {
+			kind: "scope",
+			scopeContext: await resolveScopeVetteContext(
+				parsed.scopeTarget,
+				"Scope mode explicitly requested.",
+				cwd,
+			),
+		};
+	}
+
+	try {
+		return {
+			kind: "pr",
+			prContext: await resolvePrContext(parsed.selector, cwd),
+		};
+	} catch (error) {
+		if (!parsed.scopeTarget || isLikelyPrSelector(parsed.selector)) {
+			throw error;
+		}
+		return {
+			kind: "scope",
+			scopeContext: await resolveScopeVetteContext(
+				parsed.scopeTarget,
+				error instanceof Error ? error.message : String(error),
+				cwd,
+			),
+		};
+	}
+}
+
 async function resolvePrContext(
 	selector: string,
 	cwd: string,
@@ -129,14 +296,7 @@ async function resolvePrContext(
 		);
 	}
 
-	let viewer = "";
-	try {
-		viewer = await run("gh", ["api", "user", "--jq", ".login"], cwd);
-	} catch (error) {
-		throw new Error(
-			`GitHub authentication is required to compare PR ownership. Run \`gh auth login\` and retry.\n\n${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
+	const viewer = await getViewer(cwd);
 
 	return {
 		selector,
@@ -151,14 +311,22 @@ async function resolvePrContext(
 	};
 }
 
+function slugifyBranch(value: string, fallback: string): string {
+	const slug = value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+	return slug || fallback;
+}
+
 function branchSlug(ctx: PrContext): string {
 	const raw = ctx.pr.headRefName || ctx.selector || `pr-${ctx.pr.number}`;
-	const slug = raw.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-	return slug || `pr-${ctx.pr.number}`;
+	return slugifyBranch(raw, `pr-${ctx.pr.number}`);
 }
 
 function findingsArtifactPath(ctx: PrContext): string {
 	return `/tmp/pi-vette-findings/${branchSlug(ctx)}/pr-${ctx.pr.number}-findings.md`;
+}
+
+function draftFindingsArtifactPath(ctx: DraftPrContext): string {
+	return `/tmp/pi-vette-findings/${slugifyBranch(ctx.branch, "draft-pr")}/draft-pr-findings.md`;
 }
 
 function prSummary(ctx: PrContext): string {
@@ -174,6 +342,35 @@ function prSummary(ctx: PrContext): string {
 		`Draft: ${String(ctx.pr.isDraft ?? false)}`,
 		`Merge state: ${ctx.pr.mergeStateStatus ?? "<unknown>"}`,
 		`Review decision: ${ctx.pr.reviewDecision ?? "<unknown>"}`,
+		ctx.dirtyStatus
+			? `Dirty worktree before command:\n${ctx.dirtyStatus}`
+			: "Dirty worktree before command: clean or unavailable",
+	].join("\n");
+}
+
+function draftPrSummary(ctx: DraftPrContext, resolveError: string): string {
+	return [
+		"PR: <not created yet>",
+		`Current branch: ${ctx.branch}`,
+		`Proposed base branch: ${ctx.baseBranch}`,
+		`Origin remote: ${ctx.remoteUrl}`,
+		`Authenticated GitHub user: ${ctx.viewer}`,
+		`Findings artifact: ${draftFindingsArtifactPath(ctx)}`,
+		`Existing PR lookup: ${resolveError}`,
+		ctx.dirtyStatus
+			? `Dirty worktree before command:\n${ctx.dirtyStatus}`
+			: "Dirty worktree before command: clean or unavailable",
+	].join("\n");
+}
+
+function scopeVetteSummary(ctx: ScopeVetteContext): string {
+	return [
+		`Target scope: ${ctx.target}`,
+		`Current branch: ${ctx.branch}`,
+		`Reference base branch: ${ctx.baseBranch}`,
+		`Bug ticket drafts directory: ${ctx.draftsDir}`,
+		`Findings artifact: ${ctx.findingsPath}`,
+		`PR lookup fallback reason: ${ctx.resolveError}`,
 		ctx.dirtyStatus
 			? `Dirty worktree before command:\n${ctx.dirtyStatus}`
 			: "Dirty worktree before command: clean or unavailable",
@@ -200,17 +397,36 @@ function parallelSuggestionContract(): string {
 - Merge the three lane outputs into one deduplicated suggestion set before deciding what to repair or comment on.
 - Preserve lane provenance on every suggestion: [vette], [name-check], [thermo-nuclear], or a combined tag when multiple lanes agree.
 - Do not serialize these lanes unless a repo constraint prevents parallelism; if serialization is forced, explain why.
-- Suggestions become repairs/comments only after parent verification confirms scope, impact, and evidence.`;
+- Suggestions become repairs/comments only after parent verification confirms scope, impact, and evidence.
+- Test name suggestions and questions: when the [name-check] lane produces a substantive test name suggestion (a proposed alternative name, a question about test intent, or a recommendation beyond a trivial wording tweak), that suggestion must be posted as a review comment on the actual test — anchored to the test declaration line (the it/test/describe call) in the diff. Minor mechanical tweaks (typos, casing, punctuation) that the agent can silently fix in owner mode do not require a comment, but any suggestion that questions what the test is verifying, proposes a meaningfully different name, or asks the author a question must be a comment on the test itself, not bundled into a general PR comment.`;
 }
 
-function findingsArtifactContract(ctx: PrContext): string {
+function findingsArtifactContractForPath(path: string): string {
 	return `Findings artifact contract:
-- Maintain a local Markdown findings artifact at ${findingsArtifactPath(ctx)} for this branch/PR.
+- Maintain a local Markdown findings artifact at ${path} for this branch/PR.
 - Create or update the artifact before posting or repairing anything, and keep it current as verification progresses.
 - The artifact must include every candidate finding from every lane, whether verified, rejected, duplicate, out-of-scope, test-reproduced, verified-but-untestable, or still blocked.
 - For each item, record: stable finding id, title, source lanes, status, severity/disposition, file/line when known, evidence, verification command/result, repro test path/code when applicable, posted comment URL/status when applicable, and rejection/blocker reason when applicable.
 - Use the artifact as the source of truth for final counts and for resuming the review if the session is interrupted.
 - Do not commit the artifact unless the user explicitly asks; it is a local temporary reference file.`;
+}
+
+function findingsArtifactContract(ctx: PrContext): string {
+	return findingsArtifactContractForPath(findingsArtifactPath(ctx));
+}
+
+function draftFindingsArtifactContract(ctx: DraftPrContext): string {
+	return findingsArtifactContractForPath(draftFindingsArtifactPath(ctx));
+}
+
+function bugDraftContract(ctx: ScopeVetteContext): string {
+	return `Bug ticket draft contract:
+- Create the local directory ${ctx.draftsDir} if it does not exist.
+- Write ${ctx.draftsDir}/index.md summarizing every verified, rejected, duplicate, blocked, and unverified candidate.
+- Write one Markdown draft per verified bug as ${ctx.draftsDir}/bug-<stable-id>.md.
+- Do not create tracker tickets, GitHub issues, or PR comments in scope mode.
+- Each bug draft must include: behavior-first title, target scope, severity, user/system impact, affected files/symbols, evidence, focused verification command and result, exact repro test code when practical, why no focused test was practical when omitted, suggested acceptance criteria, and smallest safe fix boundary.
+- Unverified suspicions stay only in the findings artifact and index; do not promote them to standalone bug drafts.`;
 }
 
 function reviewCommentTestContract(): string {
@@ -226,6 +442,7 @@ function reviewCommentPostingContract(): string {
 	return `Review comment posting contract:
 - Do not post comments while still gathering, testing, or cleaning up evidence. After all verification and cleanup is complete, post the verified items in one posting pass.
 - For each test-reproduced verified finding, post the associated review comment at the most precise location available: prefer file + exact diff line; if no reliable line exists, use the file-level location when GitHub supports it; if the file is not a good/valid review-comment target, post it as a general PR comment with the file/line context in the body.
+- For [name-check] test name suggestions and questions: post each substantive test name suggestion as a review comment anchored to the test declaration line (it/test/describe) in the test file diff. These are not bundled into the singular untestable-items comment; they are per-test inline comments even when no repro test applies.
 - Build one singular final PR comment for all verified-but-untestable findings. Include each item with lane provenance, severity/disposition, user impact, evidence, why a focused failing test was not practical, and file/line information whenever possible.
 - Post the singular untestable-items comment at the end of the posting pass, after all line/file-specific verified comments have been posted.
 - If GitHub rejects a line/file comment location, fall back to the next less-specific location and record that fallback in the final report.`;
@@ -305,6 +522,10 @@ function vettePrompt(
 - Post only findings that passed the verification gate; reject or report unverified suggestions without posting them.\n- ${commentPolicy}\n- Do not implement repairs on someone else's PR unless the user explicitly asks after seeing the review.\n\nUse these existing skills/instructions by prompt routing as relevant: pr-review, vette, naming, test-name, and thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentTestContract()}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\nFinish with review disposition, commands/results, findings artifact path, comments prepared and posted, rejected findings, untestable-items comment URL/status, and cleanup status.`;
 }
 
+function scopeVettePrompt(ctx: ScopeVetteContext, rawArgs: string): string {
+	return `Run /vette scope bug-discovery mode. This is not a PR review: audit the requested service/module/scope, validate likely bugs, build focused repro tests where practical, and draft local bug tickets only.\n\n${scopeVetteSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\nVisible status requirements:\n- Maintain an explicit status/todo sequence and update it immediately as phases change:\n  1. Resolve and map target scope\n  2. Run parallel risk lanes\n  3. Synthesize candidate bugs\n  4. Verify candidates with evidence and repro tests where practical\n  5. Write local bug-ticket drafts\n  6. Complete\n- While active, state the current phase in plain text, e.g. "working on (2/6): running parallel risk lanes".\n- End with "status: idle — scope vette complete" and counts for candidates, verified bugs, bug drafts written, rejected items, blocked items, and test-backed drafts.\n\nMandatory behavior:\n- Treat ${ctx.target} as the audit boundary. It may be a full service, module, package, directory, route group, job, or subsystem. First identify its entry points, dependencies, data stores, side effects, tests, and owner-facing behavior.\n- Run read-only risk lanes in parallel before deciding what deserves verification: vette risk review, naming/test-name check, and thermo-nuclear-code-quality-review. For broad service scopes, add focused lanes for API/contract boundaries, data consistency, async/job behavior, error handling, and observability where relevant.\n- Promote only verified, user-impacting defects to bug-ticket drafts. Verification can be static proof, a focused command, a runtime observation, or a temporary focused failing test.\n- For each candidate where a focused unit/regression/integration test is practical, build the smallest repro test, run the focused command, and prove it fails for the expected reason. Clean up temporary test files unless the user explicitly asks to keep them, but preserve exact test code and failing output in the draft.\n- Do not edit production code or implement fixes in scope mode unless the user explicitly asks after reading the drafts.\n- Do not create GitHub issues, Linear tickets, PR comments, or commits. Write local Markdown drafts only.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, tdd, pr-review, naming, test-name, and thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContractForPath(ctx.findingsPath)}\n\n${bugDraftContract(ctx)}\n\n${subagentContract()}\n\nFinish with target scope, drafts directory, findings artifact path, verification commands/results, repro test summary, draft filenames, rejected findings, blocked findings, and cleanup status.`;
+}
+
 function prPrompt(
 	ctx: PrContext,
 	rawArgs: string,
@@ -314,49 +535,118 @@ function prPrompt(
 - Report dirty worktree state before repair actions and protect pre-existing changes.\n- For external PR review findings, post only verified comments automatically; unverified suggestions must be rejected or reported without posting. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
 
-async function dispatchPrompt(
+function draftPrPrompt(
+	ctx: DraftPrContext,
+	resolveError: string,
+	rawArgs: string,
+	options: { wantsPosting: boolean; wantsWatch: boolean },
+): string {
+	return `Run /pr creation, vette, repair, and monitoring mode for this branch. No existing pull request was resolved, so the first workflow is to vette this branch, create the pull request, then watch it.\n\n${draftPrSummary(ctx, resolveError)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- First state "working on (1/3): vetting branch before PR creation".\n- After pre-PR verification passes, state "working on (2/3): creating pull request" and create the PR.\n- After the PR exists, state "working on (3/3): monitoring PR" and use the created PR URL/number for all PR-aware checks.\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, and the next check time.\n\nObjectives:\n1. Validate the working branch and base. Use current branch ${ctx.branch} as the PR head. Prefer ${ctx.baseBranch} as the base, but verify the remote base exists and adjust only when repository policy clearly requires a different base.\n2. Protect pre-existing dirty worktree changes. Report them before repair actions and avoid overwriting unrelated user changes.\n3. Before creating the PR, run the same owner-side /vette behavior internally against the branch diff from the base: run parallel vette, name-check, and thermo-nuclear lanes; verify every confirmed issue; repair confirmed defects through TDD-focused subagents; and run focused verification.\n4. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n5. Prepare a concise PR title and body that satisfy the template and accurately summarize the vetted changes.\n6. Push the branch when needed, then create the pull request with \`gh pr create\` targeting the validated base. Do not require the user to provide a branch, PR number, or URL.\n7. After PR creation, capture the PR URL/number and continue with the normal /pr behavior: validate title/body/base, inspect merge conflicts, inspect CI with \`gh pr checks\`, monitor comments/reviews/BugBot/bot alerts/new commits, and fix related failures with focused TDD/code subagents.\n8. ${options.wantsWatch ? "Keep watching until checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass through PR creation and initial validation, then report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${draftFindingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n- Verified external-review posting rules only apply after a PR exists. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
+}
+
+async function dispatchVettePrompt(
 	pi: ExtensionAPI,
-	commandName: "vette" | "pr",
 	args: string,
 	ctx: ExtensionCommandContext,
-	buildPrompt: (
-		prContext: PrContext,
-		parsed: ReturnType<typeof parseArgs>,
-	) => string,
 	onResolved?: (
-		prContext: PrContext,
+		vetteCommandContext: VetteCommandContext,
 		parsed: ReturnType<typeof parseArgs>,
 		options: { queued: boolean },
 	) => void,
 ): Promise<void> {
 	const parsed = parseArgs(args);
-	let prContext: PrContext;
+	let vetteCommandContext: VetteCommandContext;
 	try {
-		prContext = await resolvePrContext(parsed.selector, ctx.cwd);
+		vetteCommandContext = await resolveVetteCommandContext(parsed, ctx.cwd);
 	} catch (error) {
-		ctx.ui.notify(`/${commandName} failed to resolve PR`, "error");
+		ctx.ui.notify("/vette failed to prepare context", "error");
 		throw error;
 	}
 
-	const mode =
-		commandName === "vette"
-			? prContext.isOwner
-				? "owner repair"
-				: "external review"
-			: "prepare/watch";
-	ctx.ui.notify(
-		`/${commandName}: PR #${prContext.pr.number} (${mode})`,
-		"info",
-	);
-
-	const prompt = buildPrompt(prContext, parsed);
+	const prompt =
+		vetteCommandContext.kind === "pr"
+			? vettePrompt(vetteCommandContext.prContext, parsed.raw, {
+					wantsPosting: parsed.wantsPosting,
+				})
+			: scopeVettePrompt(vetteCommandContext.scopeContext, parsed.raw);
 	const queued = !ctx.isIdle();
-	onResolved?.(prContext, parsed, { queued });
+	onResolved?.(vetteCommandContext, parsed, { queued });
+
+	if (vetteCommandContext.kind === "pr") {
+		const prContext = vetteCommandContext.prContext;
+		ctx.ui.notify(
+			`/vette: PR #${prContext.pr.number} (${prContext.isOwner ? "owner repair" : "external review"})`,
+			"info",
+		);
+	} else {
+		ctx.ui.notify(
+			`/vette: scope ${vetteCommandContext.scopeContext.target}`,
+			"info",
+		);
+	}
+
 	if (!queued) {
 		pi.sendUserMessage(prompt);
 	} else {
 		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-		ctx.ui.notify(`/${commandName} queued as follow-up`, "info");
+		ctx.ui.notify("/vette queued as follow-up", "info");
+	}
+}
+
+async function dispatchPrPrompt(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+	onResolved?: (
+		prCommandContext: PrCommandContext,
+		parsed: ReturnType<typeof parseArgs>,
+		options: { queued: boolean },
+	) => void,
+): Promise<void> {
+	const parsed = parseArgs(args);
+	let prCommandContext: PrCommandContext;
+	try {
+		prCommandContext = await resolvePrCommandContext(parsed.selector, ctx.cwd);
+	} catch (error) {
+		ctx.ui.notify("/pr failed to prepare PR context", "error");
+		throw error;
+	}
+
+	const prompt =
+		prCommandContext.kind === "existing"
+			? prPrompt(prCommandContext.prContext, parsed.raw, {
+					wantsPosting: parsed.wantsPosting,
+					wantsWatch: parsed.wantsWatch,
+				})
+			: draftPrPrompt(
+					prCommandContext.draftContext,
+					prCommandContext.resolveError,
+					parsed.raw,
+					{
+						wantsPosting: parsed.wantsPosting,
+						wantsWatch: parsed.wantsWatch,
+					},
+				);
+	const queued = !ctx.isIdle();
+	onResolved?.(prCommandContext, parsed, { queued });
+
+	if (prCommandContext.kind === "existing") {
+		ctx.ui.notify(
+			`/pr: PR #${prCommandContext.prContext.pr.number} (prepare/watch)`,
+			"info",
+		);
+	} else {
+		ctx.ui.notify(
+			`/pr: creating PR from ${prCommandContext.draftContext.branch}`,
+			"info",
+		);
+	}
+
+	if (!queued) {
+		pi.sendUserMessage(prompt);
+	} else {
+		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		ctx.ui.notify("/pr queued as follow-up", "info");
 	}
 }
 
@@ -368,7 +658,7 @@ function formatCountdown(nextCheckAt: number, now = Date.now()): string {
 }
 
 function renderStatus(status: CommandStatus): string {
-	const base = `/${status.command} PR #${status.prNumber} ${status.phase} (${status.progress})`;
+	const base = `/${status.command} ${status.target} ${status.phase} (${status.progress})`;
 	const mode = ` ${status.mode}`;
 	const next = status.nextCheckAt
 		? ` next ${formatCountdown(status.nextCheckAt)}`
@@ -400,28 +690,46 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function setCommandStatus(
+	function setVetteCommandStatus(
 		ctx: ExtensionCommandContext,
-		command: "vette" | "pr",
-		prContext: PrContext,
+		vetteCommandContext: VetteCommandContext,
+		options: { queued: boolean },
+	): void {
+		currentStatus = {
+			command: "vette",
+			target:
+				vetteCommandContext.kind === "pr"
+					? `PR #${vetteCommandContext.prContext.pr.number}`
+					: `scope ${vetteCommandContext.scopeContext.target}`,
+			mode:
+				vetteCommandContext.kind === "pr"
+					? vetteCommandContext.prContext.isOwner
+						? "owner repair"
+						: "external review"
+					: "bug drafts",
+			phase: options.queued ? "queued" : "working",
+			progress: vetteCommandContext.kind === "pr" ? "1/1" : "1/6",
+		};
+		safePublishStatus(ctx);
+	}
+
+	function setPrCommandStatus(
+		ctx: ExtensionCommandContext,
+		prCommandContext: PrCommandContext,
 		parsed: ReturnType<typeof parseArgs>,
 		options: { queued: boolean },
 	): void {
 		currentStatus = {
-			command,
-			prNumber: prContext.pr.number,
+			command: "pr",
+			target:
+				prCommandContext.kind === "existing"
+					? `PR #${prCommandContext.prContext.pr.number}`
+					: `branch ${prCommandContext.draftContext.branch}`,
 			mode:
-				command === "vette"
-					? prContext.isOwner
-						? "owner repair"
-						: "external review"
-					: "prepare/watch",
+				prCommandContext.kind === "existing" ? "prepare/watch" : "create/watch",
 			phase: options.queued ? "queued" : "working",
-			progress: "1/1",
-			nextCheckAt:
-				command === "pr" && parsed.wantsWatch
-					? Date.now() + 15 * 60_000
-					: undefined,
+			progress: prCommandContext.kind === "existing" ? "1/1" : "1/3",
+			nextCheckAt: parsed.wantsWatch ? Date.now() + 15 * 60_000 : undefined,
 		};
 		safePublishStatus(ctx);
 	}
@@ -454,39 +762,28 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("vette", {
 		description:
-			"PR-aware vette: owner PRs are repaired with TDD subagents; external PRs get evidence-backed review comments.",
+			"Vette PRs or broader scopes; scope mode writes verified bug-ticket drafts locally.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			await dispatchPrompt(
+			await dispatchVettePrompt(
 				pi,
-				"vette",
 				args,
 				ctx,
-				(prContext, parsed) =>
-					vettePrompt(prContext, parsed.raw, {
-						wantsPosting: parsed.wantsPosting,
-					}),
-				(prContext, parsed, options) =>
-					setCommandStatus(ctx, "vette", prContext, parsed, options),
+				(vetteCommandContext, _parsed, options) =>
+					setVetteCommandStatus(ctx, vetteCommandContext, options),
 			);
 		},
 	});
 
 	pi.registerCommand("pr", {
 		description:
-			"Prepare, validate, vette, repair, and monitor a pull request until green or blocked.",
+			"Vette the current branch, create a pull request when needed, then monitor it until green or blocked.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			await dispatchPrompt(
+			await dispatchPrPrompt(
 				pi,
-				"pr",
 				args,
 				ctx,
-				(prContext, parsed) =>
-					prPrompt(prContext, parsed.raw, {
-						wantsPosting: parsed.wantsPosting,
-						wantsWatch: parsed.wantsWatch,
-					}),
-				(prContext, parsed, options) =>
-					setCommandStatus(ctx, "pr", prContext, parsed, options),
+				(prCommandContext, parsed, options) =>
+					setPrCommandStatus(ctx, prCommandContext, parsed, options),
 			);
 		},
 	});
