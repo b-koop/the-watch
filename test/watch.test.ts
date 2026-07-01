@@ -175,10 +175,10 @@ describe("createWatchController", () => {
 			"warning",
 		);
 		expect(ctx.ui.setStatus).not.toHaveBeenCalled();
-		expect(controller.status()).toBe("Watch running every 5m for PR #1.");
+		expect(controller.status()).toBe("Watch running every 15m for PR #1.");
 	});
 
-	it("starts checking the PR every five minutes by default", async () => {
+	it("starts checking the PR every fifteen minutes by default", async () => {
 		vi.useFakeTimers();
 		const refresh = vi.fn().mockResolvedValue(prSnapshot());
 		const refreshController = {
@@ -195,7 +195,7 @@ describe("createWatchController", () => {
 			"info",
 		);
 
-		await vi.advanceTimersByTimeAsync(5 * 60_000);
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
 
 		// Refresh should be called twice: once on startup (initial sweep) and once on timer
 		expect(refresh).toHaveBeenCalledTimes(2);
@@ -220,7 +220,7 @@ describe("createWatchController", () => {
 
 		expect(refresh).toHaveBeenCalledOnce();
 		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Watch checked now; next automatic check in 10m.",
+			"Watch checked now; next automatic check in 15m.",
 			"info",
 		);
 		expect(pi.appendEntry).toHaveBeenCalledWith(
@@ -239,7 +239,7 @@ describe("createWatchController", () => {
 			}),
 		);
 
-		await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+		await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
 		expect(refresh).toHaveBeenCalledOnce();
 
 		await vi.advanceTimersByTimeAsync(1);
@@ -264,7 +264,7 @@ describe("createWatchController", () => {
 		const controller = createWatchController(pi, refreshController);
 
 		controller.start(ctx, { intervalMs: 5 * 60_000 });
-		await vi.advanceTimersByTimeAsync(5 * 60_000);
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
 		controller.stop(ctx, "stopped by user");
 		vi.mocked(ctx.ui.notify).mockClear();
 		vi.mocked(ctx.ui.setStatus).mockClear();
@@ -307,7 +307,7 @@ describe("createWatchController", () => {
 		controller.start(ctx, { intervalMs: 10 * 60_000 });
 		vi.mocked(ctx.ui.notify).mockClear();
 		vi.mocked(ctx.ui.setStatus).mockClear();
-		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
 
 		expect(ctx.ui.setStatus).toHaveBeenCalledWith(
 			WATCH_STATUS_KEY,
@@ -359,7 +359,7 @@ describe("createWatchController", () => {
 
 		controller.start(ctx, { intervalMs: 10 * 60_000 });
 		vi.mocked(ctx.ui.notify).mockClear();
-		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
 
 		expect(ctx.ui.setStatus).toHaveBeenCalledWith(
 			WATCH_STATUS_KEY,
@@ -409,7 +409,7 @@ describe("createWatchController", () => {
 		expect(await controller.start(ctx)).toBe(true);
 		vi.mocked(ctx.ui.notify).mockClear();
 
-		await vi.advanceTimersByTimeAsync(5 * 60_000);
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
 
 		expect(ctx.ui.notify).toHaveBeenCalledWith(
 			"Watch stopped: PR is merged",
@@ -436,7 +436,7 @@ describe("createWatchController", () => {
 		expect(await controller.start(ctx)).toBe(true);
 		vi.mocked(ctx.ui.notify).mockClear();
 
-		await vi.advanceTimersByTimeAsync(5 * 60_000);
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
 
 		expect(ctx.ui.notify).toHaveBeenCalledWith(
 			"Watch refresh failed: Network error",

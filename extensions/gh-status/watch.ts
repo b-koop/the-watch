@@ -7,8 +7,8 @@ import type { RefreshController } from "./refresh.ts";
 
 export const WATCH_STATUS_KEY = "the-watch.watch";
 export const WATCH_CHECK_CUSTOM_TYPE = "the-watch-watch-check";
-const DEFAULT_INTERVAL_MS = 5 * 60_000;
-const MIN_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_INTERVAL_MS = 15 * 60_000;
+const MIN_INTERVAL_MS = 15 * 60_000;
 const MAX_INTERVAL_MS = 15 * 60_000;
 
 export type WatchOptions = {

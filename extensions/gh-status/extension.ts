@@ -206,11 +206,11 @@ function snapshotMetadata(snapshot: GhSnapshot | undefined): SnapshotMetadata {
 }
 
 export default function ghStatusExtension(pi: ExtensionAPI): void {
-	// Use longer intervals and better caching to reduce API calls
+	// One bundled PR snapshot at startup, then a 15-minute shared refresh cadence.
 	const controller = createRefreshController(pi, {
-		intervalMs: 300_000, // 5 minutes instead of 2 minutes
-		cacheWindowMs: 60_000, // 1 minute cache window
-		minRefreshIntervalMs: 30_000, // Minimum 30 seconds between refreshes
+		intervalMs: 15 * 60_000,
+		cacheWindowMs: 15 * 60_000,
+		minRefreshIntervalMs: 60_000,
 	});
 	const watchController = createWatchController(pi, controller);
 

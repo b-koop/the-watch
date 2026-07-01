@@ -13,6 +13,25 @@ type GhAuthor = {
 	is_bot?: boolean;
 };
 
+type GhActivity = {
+	author?: { login?: string; type?: string; __typename?: string };
+	body?: string;
+	url?: string;
+	createdAt?: string;
+	updatedAt?: string;
+	submittedAt?: string;
+};
+
+type GhCheckRollup = {
+	name?: string;
+	workflowName?: string;
+	workflow?: string;
+	state?: string;
+	status?: string;
+	conclusion?: string;
+	bucket?: string;
+};
+
 type GhPullRequest = {
 	number: number;
 	url: string;
@@ -20,18 +39,25 @@ type GhPullRequest = {
 	body?: string;
 	author?: GhAuthor;
 	headRefName?: string;
+	headRefOid?: string;
 	baseRefName?: string;
 	isDraft?: boolean;
 	state?: string;
 	mergedAt?: string | null;
 	mergeStateStatus?: string;
 	reviewDecision?: string;
+	updatedAt?: string;
+	comments?: GhActivity[];
+	reviews?: GhActivity[];
+	latestReviews?: GhActivity[];
+	statusCheckRollup?: GhCheckRollup[];
 };
 
 type PrContext = {
 	selector: string;
 	pr: GhPullRequest;
-	viewer: string;
+	localIdentity: string;
+	ownership: "local" | "external";
 	isOwner: boolean;
 	dirtyStatus: string;
 };
@@ -39,7 +65,7 @@ type PrContext = {
 type DraftPrContext = {
 	branch: string;
 	baseBranch: string;
-	viewer: string;
+	localIdentity: string;
 	dirtyStatus: string;
 	remoteUrl: string;
 };
@@ -78,12 +104,18 @@ const GH_PR_FIELDS = [
 	"body",
 	"author",
 	"headRefName",
+	"headRefOid",
 	"baseRefName",
 	"isDraft",
 	"state",
 	"mergedAt",
 	"mergeStateStatus",
 	"reviewDecision",
+	"updatedAt",
+	"comments",
+	"reviews",
+	"latestReviews",
+	"statusCheckRollup",
 ].join(",");
 
 function shellQuote(value: string): string {
@@ -145,14 +177,26 @@ async function getDirtyStatus(cwd: string): Promise<string> {
 	}
 }
 
-async function getViewer(cwd: string): Promise<string> {
-	try {
-		return await run("gh", ["api", "user", "--jq", ".login"], cwd);
-	} catch (error) {
-		throw new Error(
-			`GitHub authentication is required to prepare pull requests. Run \`gh auth login\` and retry.\n\n${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
+async function getLocalGitIdentity(cwd: string): Promise<{
+	name?: string;
+	email?: string;
+	label: string;
+}> {
+	const [name, email] = await Promise.all([
+		run("git", ["config", "user.name"], cwd).catch(() => ""),
+		run("git", ["config", "user.email"], cwd).catch(() => ""),
+	]);
+	const trimmedName = name.trim();
+	const trimmedEmail = email.trim();
+	const label =
+		trimmedName && trimmedEmail
+			? `${trimmedName} <${trimmedEmail}>`
+			: trimmedEmail || trimmedName || "<local git identity unavailable>";
+	return {
+		...(trimmedName ? { name: trimmedName } : {}),
+		...(trimmedEmail ? { email: trimmedEmail } : {}),
+		label,
+	};
 }
 
 async function getCurrentBranch(cwd: string): Promise<string> {
@@ -187,16 +231,22 @@ async function getOriginRemoteUrl(cwd: string): Promise<string> {
 }
 
 async function resolveDraftPrContext(cwd: string): Promise<DraftPrContext> {
-	const [branch, baseBranch, viewer, dirtyStatus, remoteUrl] =
+	const [branch, baseBranch, identity, dirtyStatus, remoteUrl] =
 		await Promise.all([
 			getCurrentBranch(cwd),
 			getDefaultBaseBranch(cwd),
-			getViewer(cwd),
+			getLocalGitIdentity(cwd),
 			getDirtyStatus(cwd),
 			getOriginRemoteUrl(cwd),
 		]);
 
-	return { branch, baseBranch, viewer, dirtyStatus, remoteUrl };
+	return {
+		branch,
+		baseBranch,
+		localIdentity: identity.label,
+		dirtyStatus,
+		remoteUrl,
+	};
 }
 
 async function resolvePrCommandContext(
@@ -280,6 +330,118 @@ async function resolveVetteCommandContext(
 	}
 }
 
+type LocalCommitEvidence = {
+	authorEmail?: string;
+	authorName?: string;
+	message?: string;
+	parents?: string[];
+};
+
+export function inferLocalOwnership(input: {
+	localUserEmail?: string;
+	localUserName?: string;
+	commits: LocalCommitEvidence[];
+}): { isOwner: boolean; ownership: "local" | "external" } {
+	const localEmail = input.localUserEmail?.trim().toLowerCase();
+	const localName = input.localUserName?.trim().toLowerCase();
+	const isOwner = input.commits.some((commit) => {
+		if (
+			(commit.parents?.length ?? 0) > 1 ||
+			commit.message?.startsWith("Merge ")
+		) {
+			return false;
+		}
+		return localEmail
+			? commit.authorEmail?.trim().toLowerCase() === localEmail
+			: Boolean(
+					localName && commit.authorName?.trim().toLowerCase() === localName,
+				);
+	});
+
+	return isOwner
+		? { isOwner: true, ownership: "local" }
+		: { isOwner: false, ownership: "external" };
+}
+
+async function localBranchExists(cwd: string, branch: string): Promise<boolean> {
+	try {
+		await run("git", ["rev-parse", "--verify", `${branch}^{commit}`], cwd);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function mergeBaseForBranch(
+	cwd: string,
+	branch: string,
+	baseBranch: string | undefined,
+): Promise<string | undefined> {
+	const candidates = baseBranch ? [`origin/${baseBranch}`, baseBranch] : [];
+	for (const candidate of candidates) {
+		try {
+			return await run("git", ["merge-base", candidate, branch], cwd);
+		} catch {
+			// Try the next local base candidate.
+		}
+	}
+	return undefined;
+}
+
+function parseCommitEvidence(output: string): LocalCommitEvidence[] {
+	return output.split("\x1e").flatMap((rawEntry) => {
+		const entry = rawEntry.trim();
+		if (!entry) return [];
+		const [, authorName, authorEmail, message, parents] = entry.split("\x00");
+		return [
+			{
+				...(authorName ? { authorName } : {}),
+				...(authorEmail ? { authorEmail } : {}),
+				...(message ? { message } : {}),
+				...(parents ? { parents: parents.split(" ").filter(Boolean) } : {}),
+			},
+		];
+	});
+}
+
+async function getLocalCommitEvidence(
+	cwd: string,
+	branch: string | undefined,
+	baseBranch: string | undefined,
+): Promise<LocalCommitEvidence[]> {
+	if (!branch || !(await localBranchExists(cwd, branch))) return [];
+	const mergeBase = await mergeBaseForBranch(cwd, branch, baseBranch);
+	if (!mergeBase) return [];
+	const output = await run(
+		"git",
+		[
+			"log",
+			"--format=%H%x00%an%x00%ae%x00%s%x00%P%x1e",
+			`${mergeBase}..${branch}`,
+		],
+		cwd,
+	);
+	return parseCommitEvidence(output);
+}
+
+async function resolveLocalOwnership(
+	cwd: string,
+	pr: GhPullRequest,
+): Promise<{ localIdentity: string; isOwner: boolean; ownership: "local" | "external" }> {
+	const identity = await getLocalGitIdentity(cwd);
+	const commits = await getLocalCommitEvidence(
+		cwd,
+		pr.headRefName,
+		pr.baseRefName,
+	);
+	const ownership = inferLocalOwnership({
+		localUserEmail: identity.email,
+		localUserName: identity.name,
+		commits,
+	});
+	return { localIdentity: identity.label, ...ownership };
+}
+
 async function resolvePrContext(
 	selector: string,
 	cwd: string,
@@ -300,18 +462,18 @@ async function resolvePrContext(
 		);
 	}
 
-	const viewer = await getViewer(cwd);
+	const [ownership, dirtyStatus] = await Promise.all([
+		resolveLocalOwnership(cwd, pr),
+		getDirtyStatus(cwd),
+	]);
 
 	return {
 		selector,
 		pr,
-		viewer,
-		isOwner: Boolean(
-			pr.author?.login &&
-				viewer &&
-				pr.author.login.toLowerCase() === viewer.toLowerCase(),
-		),
-		dirtyStatus: await getDirtyStatus(cwd),
+		localIdentity: ownership.localIdentity,
+		ownership: ownership.ownership,
+		isOwner: ownership.isOwner,
+		dirtyStatus,
 	};
 }
 
@@ -337,15 +499,37 @@ function draftFindingsArtifactPath(ctx: DraftPrContext): string {
 	return `/tmp/pi-vette-findings/${slugifyBranch(ctx.branch, "draft-pr")}/draft-pr-findings.md`;
 }
 
+function prSnapshotSummary(pr: GhPullRequest): string {
+	const checks = pr.statusCheckRollup ?? [];
+	const failedChecks = checks.filter((check) =>
+		/failure|timed_out|action_required|fail|error/i.test(
+			`${check.conclusion ?? check.bucket ?? check.state ?? check.status ?? ""}`,
+		),
+	).length;
+	const pendingChecks = checks.filter((check) =>
+		/pending|queued|in_progress|waiting/i.test(
+			`${check.state ?? check.status ?? check.bucket ?? ""}`,
+		),
+	).length;
+	const activityCount =
+		(pr.comments?.length ?? 0) +
+		(pr.reviews?.length ?? 0) +
+		(pr.latestReviews?.length ?? 0);
+	return `${checks.length} checks (${failedChecks} failing, ${pendingChecks} pending); ${activityCount} comments/reviews`;
+}
+
 function prSummary(ctx: PrContext): string {
 	return [
 		`PR: ${ctx.pr.url} (#${ctx.pr.number})`,
 		`Title: ${ctx.pr.title ?? "<missing>"}`,
 		`Author: ${ctx.pr.author?.login ?? "<unknown>"}`,
-		`Authenticated GitHub user: ${ctx.viewer}`,
+		`Local git identity: ${ctx.localIdentity}`,
 		`Ownership mode: ${ctx.isOwner ? "owner repair" : "external review"}`,
+		`Ownership evidence: ${ctx.ownership === "local" ? "matching local non-merge commit" : "no matching local non-merge commit"}`,
 		`Head branch: ${ctx.pr.headRefName ?? "<unknown>"}`,
+		`Head SHA: ${ctx.pr.headRefOid ?? "<unknown>"}`,
 		`Base branch: ${ctx.pr.baseRefName ?? "<unknown>"}`,
+		`PR snapshot: ${prSnapshotSummary(ctx.pr)}`,
 		`Findings artifact: ${findingsArtifactPath(ctx)}`,
 		`Draft: ${String(ctx.pr.isDraft ?? false)}`,
 		`PR state: ${ctx.pr.state ?? "<unknown>"}`,
@@ -364,7 +548,7 @@ function draftPrSummary(ctx: DraftPrContext, resolveError: string): string {
 		`Current branch: ${ctx.branch}`,
 		`Proposed base branch: ${ctx.baseBranch}`,
 		`Origin remote: ${ctx.remoteUrl}`,
-		`Authenticated GitHub user: ${ctx.viewer}`,
+		`Local git identity: ${ctx.localIdentity}`,
 		`Findings artifact: ${draftFindingsArtifactPath(ctx)}`,
 		`Existing PR lookup: ${resolveError}`,
 		ctx.dirtyStatus
@@ -530,10 +714,10 @@ function vettePrompt(
 - Do not leave the final phase in progress after returning the final report. End with "status: idle — vette complete".`;
 
 	if (ctx.isOwner) {
-		return `Run /vette owner repair mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- This PR is authored by the authenticated GitHub user, so do NOT draft or post PR review comments for findings.\n- Use evidence-first vette/pr-review techniques to find confirmed, user-impacting defects, weak tests, merge conflicts, failed checks, and review/bot comments that require action.\n- For each confirmed related finding, repair it through strict TDD: red test, red verification, green implementation, reviewer/verifier, refactor gate.\n- Spawn focused subagents according to the contract below for every non-trivial failure/finding.\n- Verify locally with focused commands, then broader checks when appropriate.\n- Commit and push focused fixes when verification passes and the repository state is safe.\n- If a finding is real but out of scope, document it in the final report instead of bloating this PR.\n- If the worktree was dirty before this command, protect pre-existing changes and report how they were handled before any repair action.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nFinish with PR URL, fixes made, commits pushed, findings artifact path, exact verification commands/results, and any blockers.\n\nComment policy: owner PR mode must not draft or post PR review comments.`;
+		return `Run /vette owner repair mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- Local non-merge commit evidence indicates this PR branch is owned here, so do NOT draft or post PR review comments for findings.\n- Use evidence-first vette/pr-review techniques to find confirmed, user-impacting defects, weak tests, merge conflicts, failed checks, and review/bot comments that require action.\n- For each confirmed related finding, repair it through strict TDD: red test, red verification, green implementation, reviewer/verifier, refactor gate.\n- Spawn focused subagents according to the contract below for every non-trivial failure/finding.\n- Verify locally with focused commands, then broader checks when appropriate.\n- Commit and push focused fixes when verification passes and the repository state is safe.\n- If a finding is real but out of scope, document it in the final report instead of bloating this PR.\n- If the worktree was dirty before this command, protect pre-existing changes and report how they were handled before any repair action.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nFinish with PR URL, fixes made, commits pushed, findings artifact path, exact verification commands/results, and any blockers.\n\nComment policy: owner PR mode must not draft or post PR review comments.`;
 	}
 
-	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- This PR is NOT authored by the authenticated GitHub user, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason.
+	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- Local non-merge commit evidence does not show this PR branch is owned here, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason.
 - Prepare GitHub review comments that follow the repo comment contract: exact file/line when available, user impact, local evidence, fix boundary, and suggested tests when appropriate. For test-reproducible findings, include the exact failing test code in the associated comment body.
 - After all verification and cleanup is complete, post verified comments in one posting pass. Prefer file/line comments, fall back to file-level comments when line placement is not possible, and fall back to a general PR comment when the file is not a good comment target.
 - Build and post one singular final PR comment for verified-but-untestable findings, including file/line information for every item where possible.

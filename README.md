@@ -21,10 +21,12 @@ pi install /Users/benjaminkoop/code/pi/the-watch
 
 ### `/vette [pr|branch|url|scope] [--scope] [--post-comments]`
 
-Resolves a GitHub pull request with `gh pr view`, compares the PR author to the
-authenticated `gh api user --jq .login`, then dispatches the right agent
-workflow. If the selector is not a PR number or URL and cannot be resolved as a
-PR, `/vette` treats it as a broader scope such as a service, module, package,
+Resolves a GitHub pull request with one bundled `gh pr view`, infers owner mode
+from local non-merge commit authors on a locally available branch, then
+dispatches the right agent workflow. If no matching local commit evidence is
+available, `/vette` defaults to external-review mode. If the selector is not a
+PR number or URL and cannot be resolved as a PR, `/vette` treats it as a broader
+scope such as a service, module, package,
 directory, route group, job, or subsystem. Use `--scope` to force scope mode;
 `/vette --scope` audits the current worktree.
 
@@ -75,12 +77,13 @@ prepares the current branch for PR creation.
 - runs the same PR-aware `/vette` behavior internally, including automatic
   posting of verified external-PR findings after a PR exists,
 - resolves related merge conflicts,
-- monitors `gh pr checks`, comments, bot feedback, review state, PR merge state,
-  and branch changes,
+- monitors the shared PR snapshot for checks, comments, bot feedback, review
+  state, PR merge state, and branch changes,
 - closes the watch item immediately when the PR reaches the merged state,
 - fixes related failures with focused TDD/code subagents,
 - retries unrelated flaky CI once when safe,
-- reports visible status and 15-minute watch timing while working.
+- performs one immediate PR snapshot refresh, then reports visible status and
+  15-minute watch timing while working.
 
 The extension also publishes a footer status such as:
 
