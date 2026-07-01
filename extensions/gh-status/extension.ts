@@ -53,6 +53,17 @@ function statusSeverity(
 	return "muted";
 }
 
+function canFitThreeColumnFooter(input: {
+	width: number;
+	leftWidth: number;
+	middleWidth: number;
+	rightWidth: number;
+}): boolean {
+	const contentWidth = input.leftWidth + input.middleWidth + input.rightWidth;
+	const requiredGapWidth = 2;
+	return contentWidth + requiredGapWidth <= input.width;
+}
+
 const githubFooter: FooterFactory = (_tui, theme, footerData) => ({
 	invalidate() {},
 	render(width: number) {
@@ -60,7 +71,8 @@ const githubFooter: FooterFactory = (_tui, theme, footerData) => ({
 		const service = statuses.get("gh-status.service") ?? "";
 		const pr = statuses.get("gh-status.pr") ?? "";
 		const watch = statuses.get("the-watch.watch") ?? "";
-		if (!service && !pr && !watch) return [];
+		const hasFooterStatus = Boolean(service || pr || watch);
+		if (!hasFooterStatus) return [];
 
 		const left = theme.fg(statusSeverity(service), service);
 		const right = theme.fg(statusSeverity(pr), pr);
@@ -71,9 +83,14 @@ const githubFooter: FooterFactory = (_tui, theme, footerData) => ({
 			const leftWidth = visibleWidth(left);
 			const middleWidth = visibleWidth(watchStatus);
 			const rightWidth = visibleWidth(right);
-			const totalWidth = leftWidth + middleWidth + rightWidth + 2; // 2 spaces
-
-			if (totalWidth <= width) {
+			if (
+				canFitThreeColumnFooter({
+					width,
+					leftWidth,
+					middleWidth,
+					rightWidth,
+				})
+			) {
 				const leftGap = Math.max(
 					1,
 					Math.floor((width - leftWidth - middleWidth - rightWidth) / 2),
@@ -135,6 +152,10 @@ function watchDescription(
 			return "Stop watch mode";
 		case "now":
 			return "Run a watch check now";
+		default: {
+			const exhaustive: never = subcommand;
+			return exhaustive;
+		}
 	}
 }
 
@@ -205,15 +226,23 @@ function snapshotMetadata(snapshot: GhSnapshot | undefined): SnapshotMetadata {
 	};
 }
 
-export default function ghStatusExtension(pi: ExtensionAPI): void {
-	// One bundled PR snapshot at startup, then a 15-minute shared refresh cadence.
-	const controller = createRefreshController(pi, {
-		intervalMs: 15 * 60_000,
-		cacheWindowMs: 15 * 60_000,
-		minRefreshIntervalMs: 60_000,
-	});
-	const watchController = createWatchController(pi, controller);
+type RefreshControllerInstance = ReturnType<typeof createRefreshController>;
+type WatchControllerInstance = ReturnType<typeof createWatchController>;
+type ToolRegistration = Parameters<ExtensionAPI["registerTool"]>[0];
+type ToolExecute = NonNullable<ToolRegistration["execute"]>;
 
+type PrDiagnosticsParams = {
+	includeComments?: boolean;
+};
+
+function shouldIncludePrComments(params: unknown): boolean {
+	return (params as PrDiagnosticsParams).includeComments !== false;
+}
+
+function registerGithubLifecycle(
+	pi: ExtensionAPI,
+	controller: RefreshControllerInstance,
+): void {
 	pi.on("session_start", async (_event, ctx) => {
 		ctx.ui.setFooter(githubFooter);
 		controller.restore(ctx);
@@ -221,8 +250,8 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 		await controller.refresh(ctx, "session_start");
 	});
 
-	// Refresh less aggressively - only on turn_end to avoid double API calls
-	// The caching logic will prevent redundant calls anyway
+	// Refresh less aggressively - only on turn_end to avoid double API calls.
+	// The caching logic will prevent redundant calls anyway.
 	pi.on("turn_end", async (_event, ctx) => {
 		void controller.refresh(ctx, "turn_end", ctx.signal).catch(() => undefined);
 	});
@@ -231,7 +260,12 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 		controller.stop();
 		ctx.ui.setFooter(undefined);
 	});
+}
 
+function registerGithubStatusCommands(
+	pi: ExtensionAPI,
+	controller: RefreshControllerInstance,
+): void {
 	pi.registerCommand("gh-status-refresh", {
 		description: "Refresh GitHub service and current-branch PR status",
 		handler: async (_args, ctx) => {
@@ -256,7 +290,12 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 			ctx.ui.notify(controller.diagnostics(), "info");
 		},
 	});
+}
 
+function registerWatchCommand(
+	pi: ExtensionAPI,
+	watchController: WatchControllerInstance,
+): void {
 	pi.registerCommand("watch", {
 		description:
 			"Watch the current PR for blockers. Subcommands: start, status, stop, now.",
@@ -281,6 +320,44 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 			}
 		},
 	});
+}
+
+function registerGithubTools(
+	pi: ExtensionAPI,
+	controller: RefreshControllerInstance,
+): void {
+	const executeGithubStatusRefresh: ToolExecute = async (...args) => {
+		const [, , signal, , ctx] = args;
+		const snapshot = await controller.refresh(ctx, "tool", signal);
+		return {
+			content: [{ type: "text", text: controller.diagnostics() }],
+			details: {
+				checkedAt: snapshot.checkedAt,
+				reason: snapshot.reason,
+				prKind: snapshot.pr.kind,
+			},
+		};
+	};
+
+	const executeGithubPrDiagnostics: ToolExecute = async (...args) => {
+		const [, params, signal, , ctx] = args;
+		if (!controller.getSnapshot()) {
+			await controller.refresh(ctx, "tool", signal);
+		}
+		const diagnostics = controller.diagnostics();
+		const text = shouldIncludePrComments(params)
+			? diagnostics
+			: `${diagnostics.split("\n- ")[0]}\n`;
+		return {
+			content: [{ type: "text", text }],
+			details: snapshotMetadata(controller.getSnapshot()),
+		};
+	};
+
+	const executeGithubStatusDebug: ToolExecute = async () => ({
+		content: [{ type: "text", text: controller.diagnostics() }],
+		details: snapshotMetadata(controller.getSnapshot()),
+	});
 
 	pi.registerTool({
 		name: "github_status_refresh",
@@ -290,17 +367,7 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Refresh GitHub service/current-branch PR status when PR health or GitHub incidents matter.",
 		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-			const snapshot = await controller.refresh(ctx, "tool", signal);
-			return {
-				content: [{ type: "text", text: controller.diagnostics() }],
-				details: {
-					checkedAt: snapshot.checkedAt,
-					reason: snapshot.reason,
-					prKind: snapshot.pr.kind,
-				},
-			};
-		},
+		execute: executeGithubStatusRefresh,
 	});
 
 	pi.registerTool({
@@ -318,20 +385,7 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 				}),
 			),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (!controller.getSnapshot()) {
-				await controller.refresh(ctx, "tool", signal);
-			}
-			const diagnostics = controller.diagnostics();
-			const text =
-				params.includeComments === false
-					? `${diagnostics.split("\n- ")[0]}\n`
-					: diagnostics;
-			return {
-				content: [{ type: "text", text }],
-				details: snapshotMetadata(controller.getSnapshot()),
-			};
-		},
+		execute: executeGithubPrDiagnostics,
 	});
 
 	pi.registerTool({
@@ -340,11 +394,21 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 		description:
 			"Show GitHub status extension debug state without forcing a refresh.",
 		parameters: Type.Object({}),
-		async execute() {
-			return {
-				content: [{ type: "text", text: controller.diagnostics() }],
-				details: snapshotMetadata(controller.getSnapshot()),
-			};
-		},
+		execute: executeGithubStatusDebug,
 	});
+}
+
+export default function ghStatusExtension(pi: ExtensionAPI): void {
+	// One bundled PR snapshot at startup, then a 15-minute shared refresh cadence.
+	const controller = createRefreshController(pi, {
+		intervalMs: 15 * 60_000,
+		cacheWindowMs: 15 * 60_000,
+		minRefreshIntervalMs: 60_000,
+	});
+	const watchController = createWatchController(pi, controller);
+
+	registerGithubLifecycle(pi, controller);
+	registerGithubStatusCommands(pi, controller);
+	registerWatchCommand(pi, watchController);
+	registerGithubTools(pi, controller);
 }
