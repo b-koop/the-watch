@@ -442,7 +442,7 @@ function reviewCommentPostingContract(): string {
 	return `Review comment posting contract:
 - Do not post comments while still gathering, testing, or cleaning up evidence. After all verification and cleanup is complete, post the verified items in one posting pass.
 - For each test-reproduced verified finding, post the associated review comment at the most precise location available: prefer file + exact diff line; if no reliable line exists, use the file-level location when GitHub supports it; if the file is not a good/valid review-comment target, post it as a general PR comment with the file/line context in the body.
-- For [name-check] test name suggestions and questions: post each substantive test name suggestion as a review comment anchored to the test declaration line (it/test/describe) in the test file diff. These are not bundled into the singular untestable-items comment; they are per-test inline comments even when no repro test applies.
+- For [name-check] test name suggestions and questions: post each substantive test name suggestion as a review comment anchored to the test declaration line (it/test/describe) in the test file diff. Use the minimal naming-suggestion comment style from the template contract: a suggestion block with the replacement test declaration first, then brief reasoning. Do not attach or reference screenshots, clipboard paths, or local image paths for naming suggestions. These are not bundled into the singular untestable-items comment; they are per-test inline comments even when no repro test applies.
 - Build one singular final PR comment for all verified-but-untestable findings. Include each item with lane provenance, severity/disposition, user impact, evidence, why a focused failing test was not practical, and file/line information whenever possible.
 - Post the singular untestable-items comment at the end of the posting pass, after all line/file-specific verified comments have been posted.
 - If GitHub rejects a line/file comment location, fall back to the next less-specific location and record that fallback in the final report.`;
@@ -470,6 +470,14 @@ function reviewCommentTemplateContract(): string {
 ~~~~
 
 **Fix boundary:** <smallest safe change expected>
+
+- For [name-check] test-name-only comments, do not use the verified issue template above. Use this minimal body exactly:
+
+\`\`\`suggest
+<full replacement it/test/describe declaration line with the better test name, preserving indentation and syntax>
+\`\`\`
+
+<brief reasoning for why the replacement better names the behavior>
 
 - For general PR-comment fallbacks of test-reproduced findings, use the same template and keep **Location** as the first field with the best available file/line context.
 - For the singular final verified-but-untestable PR comment, use this body:
