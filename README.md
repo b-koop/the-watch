@@ -40,6 +40,9 @@ directory, route group, job, or subsystem. Use `--scope` to force scope mode;
   possible, or a general PR comment as fallback. When a finding can be reproduced
   with a focused unit/regression test, the agent builds the failing repro test
   and includes that test code in the associated templated comment body.
+  Name-check comments for test names and identifier/variable naming use GitHub
+  `suggest` blocks when a full-line replacement is available, so reviewers can
+  apply non-functional naming changes directly from the PR UI.
   Verified-but-untestable items are grouped into one final templated PR comment
   with file/line context wherever possible.
 - **Scope bug-discovery mode**: audits the requested scope, validates candidate
