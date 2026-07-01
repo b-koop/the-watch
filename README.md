@@ -1,7 +1,7 @@
 # The Watch
 
-Reusable local Pi package that guards pull requests with PR-aware `/vette` and
-`/pr` commands.
+Reusable local Pi package that guards pull requests with PR-aware `/vette`,
+`/pr`, `/watch`, and GitHub status commands.
 
 ## Install or test
 
@@ -61,7 +61,7 @@ blocked items, so later runs can reference the full review history.
 ### `/pr [pr|branch|url] [--post-comments] [--no-watch]`
 
 Vettes the current branch, creates a PR when one does not already exist, then
-babysits the PR. The selector is optional: without a PR number, branch, or URL,
+watches the PR. The selector is optional: without a PR number, branch, or URL,
 `/pr` first tries the current branch's existing PR; if none is found, it
 prepares the current branch for PR creation.
 
@@ -75,8 +75,9 @@ prepares the current branch for PR creation.
 - runs the same PR-aware `/vette` behavior internally, including automatic
   posting of verified external-PR findings after a PR exists,
 - resolves related merge conflicts,
-- monitors `gh pr checks`, comments, bot feedback, review state, and branch
-  changes,
+- monitors `gh pr checks`, comments, bot feedback, review state, PR merge state,
+  and branch changes,
+- closes the watch item immediately when the PR reaches the merged state,
 - fixes related failures with focused TDD/code subagents,
 - retries unrelated flaky CI once when safe,
 - reports visible status and 15-minute watch timing while working.
@@ -87,7 +88,43 @@ The extension also publishes a footer status such as:
 /pr PR #123 working (1/1) prepare/watch next 14m
 ```
 
-When the agent finishes, the status returns to idle.
+When the agent finishes, the status returns to idle. If the PR is already merged
+or the watch run ends with a merged-state report, the footer shows the PR as
+merged instead.
+
+### `/watch [start|status|stop|now]`
+
+Monitors the current branch's open GitHub PR for blocking issues and queues one
+investigation turn when new work appears. The subcommand autocompletes after
+`/watch`.
+
+- `/watch` or `/watch start` starts monitoring, performs an immediate sweep of
+  current blockers, then checks on a timer.
+- `/watch status` shows whether watch mode is running and which PR it is
+  monitoring.
+- `/watch stop` stops monitoring and clears the watch footer status.
+- `/watch now` runs an immediate check and restarts the wait for the next
+  automatic check.
+
+Watch mode detects merge conflicts, failed checks, human comments/reviews, and
+BugBot activity. It prioritizes merge conflicts, human feedback, pipeline
+failures, then BugBot items. New findings are recorded in the session and routed
+to the agent with TDD-focused fix instructions.
+
+### GitHub status commands and tools
+
+The package also shows GitHub service health and current-branch PR status in the
+footer and exposes the migrated GitHub status commands:
+
+- `/gh-status-refresh` refreshes GitHub service and PR status.
+- `/gh-pr` shows current branch PR diagnostics.
+- `/gh-status-debug` shows debug status without forcing a refresh.
+
+Assistant tools exposed by the package:
+
+- `github_status_refresh`
+- `github_pr_diagnostics`
+- `github_status_debug`
 
 ## Requirements
 

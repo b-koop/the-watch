@@ -22,6 +22,8 @@ type GhPullRequest = {
 	headRefName?: string;
 	baseRefName?: string;
 	isDraft?: boolean;
+	state?: string;
+	mergedAt?: string | null;
 	mergeStateStatus?: string;
 	reviewDecision?: string;
 };
@@ -64,7 +66,7 @@ type CommandStatus = {
 	command: "vette" | "pr";
 	target: string;
 	mode: string;
-	phase: "working" | "queued" | "idle" | "blocked";
+	phase: "working" | "queued" | "idle" | "blocked" | "merged";
 	progress: string;
 	nextCheckAt?: number;
 };
@@ -78,6 +80,8 @@ const GH_PR_FIELDS = [
 	"headRefName",
 	"baseRefName",
 	"isDraft",
+	"state",
+	"mergedAt",
 	"mergeStateStatus",
 	"reviewDecision",
 ].join(",");
@@ -325,6 +329,10 @@ function findingsArtifactPath(ctx: PrContext): string {
 	return `/tmp/pi-vette-findings/${branchSlug(ctx)}/pr-${ctx.pr.number}-findings.md`;
 }
 
+function isMergedPullRequest(pr: GhPullRequest): boolean {
+	return pr.state?.toUpperCase() === "MERGED" || Boolean(pr.mergedAt);
+}
+
 function draftFindingsArtifactPath(ctx: DraftPrContext): string {
 	return `/tmp/pi-vette-findings/${slugifyBranch(ctx.branch, "draft-pr")}/draft-pr-findings.md`;
 }
@@ -340,6 +348,8 @@ function prSummary(ctx: PrContext): string {
 		`Base branch: ${ctx.pr.baseRefName ?? "<unknown>"}`,
 		`Findings artifact: ${findingsArtifactPath(ctx)}`,
 		`Draft: ${String(ctx.pr.isDraft ?? false)}`,
+		`PR state: ${ctx.pr.state ?? "<unknown>"}`,
+		`Merged at: ${ctx.pr.mergedAt ?? "<not merged>"}`,
 		`Merge state: ${ctx.pr.mergeStateStatus ?? "<unknown>"}`,
 		`Review decision: ${ctx.pr.reviewDecision ?? "<unknown>"}`,
 		ctx.dirtyStatus
@@ -539,7 +549,7 @@ function prPrompt(
 	rawArgs: string,
 	options: { wantsPosting: boolean; wantsWatch: boolean },
 ): string {
-	return `Run /pr preparation, vette, repair, and monitoring mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, progress like "working on (1/1)", and the next check time.\n- When no actionable issue/comment/check failure is present, state "idle until <time>" instead of spawning agents.\n- When a new actionable issue appears, state "working on (n/total)" and only then spin up the focused code agent for that issue.\n\nObjectives:\n1. Resolve and validate the integration base/target branch. Prefer the PR base branch already shown above; verify it exists remotely before diffing or updating.\n2. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n3. Analyze the current PR title/body against the template and rules. Plan exact updates needed; apply safe title/body fixes when appropriate.\n4. Run the same PR-aware /vette behavior internally:\n   - Owner PR: no comments; find and fix confirmed issues through TDD-focused subagents.\n   - External PR: evidence-backed review comments are posted automatically after all verification is complete. At the end of synthesis, create focused unit/regression repro tests for comment-worthy findings where practical, verify those tests fail for the expected reason, include the exact test code in the templated associated comment body, then post verified items in one pass using file/line comments when possible, file-level comments when line placement is not possible, and general PR comments as the fallback. Build one singular templated final comment for verified-but-untestable items with file/line context whenever possible.\n5. Detect merge conflicts and resolve related conflicts through a focused merge-conflict resolver agent.\n6. Inspect CI with \`gh pr checks\` as the source of truth. For failed checks, classify related/unrelated/uncertain. Treat uncertain as related until proven otherwise.\n7. Fix related failures with focused code/TDD subagents. For unrelated flaky/infrastructure failures, retry once when safe, document evidence, and avoid bloating this PR.\n8. Inspect PR comments, reviews, BugBot/bot alerts, and new commits. Spin up code/fix agents only when a new actionable issue/comment/check failure appears.\n9. ${options.wantsWatch ? "Keep watching until checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass and report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: pull-request, vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:
+	return `Run /pr preparation, vette, repair, and monitoring mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, progress like "working on (1/1)", and the next check time.\n- On every watch check, inspect the PR lifecycle with \`gh pr view ${ctx.pr.number} --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #${ctx.pr.number} is merged; watch closed".\n- When no actionable issue/comment/check failure is present, state "idle until <time>" instead of spawning agents.\n- When a new actionable issue appears, state "working on (n/total)" and only then spin up the focused code agent for that issue.\n\nObjectives:\n1. Resolve and validate the integration base/target branch. Prefer the PR base branch already shown above; verify it exists remotely before diffing or updating.\n2. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n3. Analyze the current PR title/body against the template and rules. Plan exact updates needed; apply safe title/body fixes when appropriate.\n4. Run the same PR-aware /vette behavior internally:\n   - Owner PR: no comments; find and fix confirmed issues through TDD-focused subagents.\n   - External PR: evidence-backed review comments are posted automatically after all verification is complete. At the end of synthesis, create focused unit/regression repro tests for comment-worthy findings where practical, verify those tests fail for the expected reason, include the exact test code in the templated associated comment body, then post verified items in one pass using file/line comments when possible, file-level comments when line placement is not possible, and general PR comments as the fallback. Build one singular templated final comment for verified-but-untestable items with file/line context whenever possible.\n5. Detect merge conflicts and resolve related conflicts through a focused merge-conflict resolver agent.\n6. Inspect CI with \`gh pr checks\` as the source of truth. For failed checks, classify related/unrelated/uncertain. Treat uncertain as related until proven otherwise.\n7. Fix related failures with focused code/TDD subagents. For unrelated flaky/infrastructure failures, retry once when safe, document evidence, and avoid bloating this PR.\n8. Inspect PR comments, reviews, BugBot/bot alerts, and new commits. Spin up code/fix agents only when a new actionable issue/comment/check failure appears.\n9. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass and report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: pull-request, vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:
 - Report dirty worktree state before repair actions and protect pre-existing changes.\n- For external PR review findings, post only verified comments automatically; unverified suggestions must be rejected or reported without posting. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
 
@@ -549,7 +559,9 @@ function draftPrPrompt(
 	rawArgs: string,
 	options: { wantsPosting: boolean; wantsWatch: boolean },
 ): string {
-	return `Run /pr creation, vette, repair, and monitoring mode for this branch. No existing pull request was resolved, so the first workflow is to vette this branch, create the pull request, then watch it.\n\n${draftPrSummary(ctx, resolveError)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- First state "working on (1/3): vetting branch before PR creation".\n- After pre-PR verification passes, state "working on (2/3): creating pull request" and create the PR.\n- After the PR exists, state "working on (3/3): monitoring PR" and use the created PR URL/number for all PR-aware checks.\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, and the next check time.\n\nObjectives:\n1. Validate the working branch and base. Use current branch ${ctx.branch} as the PR head. Prefer ${ctx.baseBranch} as the base, but verify the remote base exists and adjust only when repository policy clearly requires a different base.\n2. Protect pre-existing dirty worktree changes. Report them before repair actions and avoid overwriting unrelated user changes.\n3. Before creating the PR, run the same owner-side /vette behavior internally against the branch diff from the base: run parallel vette, name-check, and thermo-nuclear lanes; verify every confirmed issue; repair confirmed defects through TDD-focused subagents; and run focused verification.\n4. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n5. Prepare a concise PR title and body that satisfy the template and accurately summarize the vetted changes.\n6. Push the branch when needed, then create the pull request with \`gh pr create\` targeting the validated base. Do not require the user to provide a branch, PR number, or URL.\n7. After PR creation, capture the PR URL/number and continue with the normal /pr behavior: validate title/body/base, inspect merge conflicts, inspect CI with \`gh pr checks\`, monitor comments/reviews/BugBot/bot alerts/new commits, and fix related failures with focused TDD/code subagents.\n8. ${options.wantsWatch ? "Keep watching until checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass through PR creation and initial validation, then report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${draftFindingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n- Verified external-review posting rules only apply after a PR exists. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
+	return `Run /pr creation, vette, repair, and monitoring mode for this branch. No existing pull request was resolved, so the first workflow is to vette this branch, create the pull request, then watch it.\n\n${draftPrSummary(ctx, resolveError)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- First state "working on (1/3): vetting branch before PR creation".\n- After pre-PR verification passes, state "working on (2/3): creating pull request" and create the PR.\n- After the PR exists, state "working on (3/3): monitoring PR" and use the created PR URL/number for all PR-aware checks.\n- Check immediately, then use a 15-minute cadence while watching.
+- Before every wait, state the current PR status, what was checked, whether you are working or idle, and the next check time.
+- After the PR exists, every watch check must inspect the PR lifecycle with \`gh pr view <created-pr-number-or-url> --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #<number> is merged; watch closed".\n\nObjectives:\n1. Validate the working branch and base. Use current branch ${ctx.branch} as the PR head. Prefer ${ctx.baseBranch} as the base, but verify the remote base exists and adjust only when repository policy clearly requires a different base.\n2. Protect pre-existing dirty worktree changes. Report them before repair actions and avoid overwriting unrelated user changes.\n3. Before creating the PR, run the same owner-side /vette behavior internally against the branch diff from the base: run parallel vette, name-check, and thermo-nuclear lanes; verify every confirmed issue; repair confirmed defects through TDD-focused subagents; and run focused verification.\n4. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n5. Prepare a concise PR title and body that satisfy the template and accurately summarize the vetted changes.\n6. Push the branch when needed, then create the pull request with \`gh pr create\` targeting the validated base. Do not require the user to provide a branch, PR number, or URL.\n7. After PR creation, capture the PR URL/number and continue with the normal /pr behavior: validate title/body/base, inspect merge conflicts, inspect CI with \`gh pr checks\`, monitor comments/reviews/BugBot/bot alerts/new commits, and fix related failures with focused TDD/code subagents.\n8. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass through PR creation and initial validation, then report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${draftFindingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n- Verified external-review posting rules only apply after a PR exists. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
 
 async function dispatchVettePrompt(
@@ -620,6 +632,20 @@ async function dispatchPrPrompt(
 		throw error;
 	}
 
+	const queued = !ctx.isIdle();
+	onResolved?.(prCommandContext, parsed, { queued });
+
+	if (
+		prCommandContext.kind === "existing" &&
+		isMergedPullRequest(prCommandContext.prContext.pr)
+	) {
+		ctx.ui.notify(
+			`/pr: PR #${prCommandContext.prContext.pr.number} is already merged; watch closed`,
+			"info",
+		);
+		return;
+	}
+
 	const prompt =
 		prCommandContext.kind === "existing"
 			? prPrompt(prCommandContext.prContext, parsed.raw, {
@@ -635,8 +661,6 @@ async function dispatchPrPrompt(
 						wantsWatch: parsed.wantsWatch,
 					},
 				);
-	const queued = !ctx.isIdle();
-	onResolved?.(prCommandContext, parsed, { queued });
 
 	if (prCommandContext.kind === "existing") {
 		ctx.ui.notify(
@@ -658,6 +682,39 @@ async function dispatchPrPrompt(
 	}
 }
 
+function textFromMessage(message: unknown): string {
+	if (!message || typeof message !== "object") return "";
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((block) => {
+			if (!block || typeof block !== "object") return "";
+			const maybeText = (block as { text?: unknown }).text;
+			return typeof maybeText === "string" ? maybeText : "";
+		})
+		.join("\n");
+}
+
+function agentReportedMerged(event: unknown): boolean {
+	if (!event || typeof event !== "object") return false;
+	const messages = (event as { messages?: unknown }).messages;
+	if (!Array.isArray(messages)) return false;
+	let lastAssistant: unknown;
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (
+			message &&
+			typeof message === "object" &&
+			(message as { role?: unknown }).role === "assistant"
+		) {
+			lastAssistant = message;
+			break;
+		}
+	}
+	return /status:\s*merged\b/i.test(textFromMessage(lastAssistant));
+}
+
 function formatCountdown(nextCheckAt: number, now = Date.now()): string {
 	const remainingMs = Math.max(0, nextCheckAt - now);
 	const minutes = Math.floor(remainingMs / 60_000);
@@ -666,12 +723,72 @@ function formatCountdown(nextCheckAt: number, now = Date.now()): string {
 }
 
 function renderStatus(status: CommandStatus): string {
+	if (status.phase === "merged")
+		return `/${status.command} ${status.target} merged`;
 	const base = `/${status.command} ${status.target} ${status.phase} (${status.progress})`;
 	const mode = ` ${status.mode}`;
 	const next = status.nextCheckAt
 		? ` next ${formatCountdown(status.nextCheckAt)}`
 		: "";
 	return `${base}${mode}${next}`;
+}
+
+function buildVetteCommandStatus(
+	vetteCommandContext: VetteCommandContext,
+	options: { queued: boolean },
+): CommandStatus {
+	if (vetteCommandContext.kind === "pr") {
+		return {
+			command: "vette",
+			target: `PR #${vetteCommandContext.prContext.pr.number}`,
+			mode: vetteCommandContext.prContext.isOwner
+				? "owner repair"
+				: "external review",
+			phase: options.queued ? "queued" : "working",
+			progress: "1/1",
+		};
+	}
+	return {
+		command: "vette",
+		target: `scope ${vetteCommandContext.scopeContext.target}`,
+		mode: "bug drafts",
+		phase: options.queued ? "queued" : "working",
+		progress: "1/6",
+	};
+}
+
+function buildPrCommandStatus(
+	prCommandContext: PrCommandContext,
+	parsed: ReturnType<typeof parseArgs>,
+	options: { queued: boolean },
+): CommandStatus {
+	if (prCommandContext.kind === "draft") {
+		return {
+			command: "pr",
+			target: `branch ${prCommandContext.draftContext.branch}`,
+			mode: "create/watch",
+			phase: options.queued ? "queued" : "working",
+			progress: "1/3",
+			nextCheckAt: parsed.wantsWatch ? Date.now() + 15 * 60_000 : undefined,
+		};
+	}
+
+	const isMerged = isMergedPullRequest(prCommandContext.prContext.pr);
+	let phase: CommandStatus["phase"] = "working";
+	if (isMerged) {
+		phase = "merged";
+	} else if (options.queued) {
+		phase = "queued";
+	}
+	return {
+		command: "pr",
+		target: `PR #${prCommandContext.prContext.pr.number}`,
+		mode: isMerged ? "merged" : "prepare/watch",
+		phase,
+		progress: isMerged ? "0/0" : "1/1",
+		nextCheckAt:
+			parsed.wantsWatch && !isMerged ? Date.now() + 15 * 60_000 : undefined,
+	};
 }
 
 export default function (pi: ExtensionAPI) {
@@ -703,21 +820,7 @@ export default function (pi: ExtensionAPI) {
 		vetteCommandContext: VetteCommandContext,
 		options: { queued: boolean },
 	): void {
-		currentStatus = {
-			command: "vette",
-			target:
-				vetteCommandContext.kind === "pr"
-					? `PR #${vetteCommandContext.prContext.pr.number}`
-					: `scope ${vetteCommandContext.scopeContext.target}`,
-			mode:
-				vetteCommandContext.kind === "pr"
-					? vetteCommandContext.prContext.isOwner
-						? "owner repair"
-						: "external review"
-					: "bug drafts",
-			phase: options.queued ? "queued" : "working",
-			progress: vetteCommandContext.kind === "pr" ? "1/1" : "1/6",
-		};
+		currentStatus = buildVetteCommandStatus(vetteCommandContext, options);
 		safePublishStatus(ctx);
 	}
 
@@ -727,18 +830,7 @@ export default function (pi: ExtensionAPI) {
 		parsed: ReturnType<typeof parseArgs>,
 		options: { queued: boolean },
 	): void {
-		currentStatus = {
-			command: "pr",
-			target:
-				prCommandContext.kind === "existing"
-					? `PR #${prCommandContext.prContext.pr.number}`
-					: `branch ${prCommandContext.draftContext.branch}`,
-			mode:
-				prCommandContext.kind === "existing" ? "prepare/watch" : "create/watch",
-			phase: options.queued ? "queued" : "working",
-			progress: prCommandContext.kind === "existing" ? "1/1" : "1/3",
-			nextCheckAt: parsed.wantsWatch ? Date.now() + 15 * 60_000 : undefined,
-		};
+		currentStatus = buildPrCommandStatus(prCommandContext, parsed, options);
 		safePublishStatus(ctx);
 	}
 
@@ -748,9 +840,18 @@ export default function (pi: ExtensionAPI) {
 		if (currentStatus) safePublishStatus(ctx);
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
+	pi.on("agent_end", (event, ctx) => {
 		if (currentStatus) {
-			currentStatus.phase = "idle";
+			if (
+				currentStatus.command === "pr" &&
+				currentStatus.phase !== "idle" &&
+				agentReportedMerged(event)
+			) {
+				currentStatus.phase = "merged";
+				currentStatus.mode = "merged";
+			} else if (currentStatus.phase !== "merged") {
+				currentStatus.phase = "idle";
+			}
 			currentStatus.progress = "0/0";
 			currentStatus.nextCheckAt = undefined;
 		}
@@ -784,7 +885,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("pr", {
 		description:
-			"Vette the current branch, create a pull request when needed, then monitor it until green or blocked.",
+			"Vette the current branch, create a pull request when needed, then monitor it until merged, green, or blocked.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			await dispatchPrPrompt(
 				pi,

@@ -1,7 +1,7 @@
 {
   "name": "the-watch",
   "version": "0.1.0",
-  "description": "Pi package that guards PRs with PR-aware /vette and /pr commands.",
+  "description": "Pi package that guards pull requests with PR-aware /vette, /pr, and /watch commands plus GitHub status diagnostics.",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -10,18 +10,26 @@
   "private": true,
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/pr-vette.ts",
+      "./extensions/gh-status/extension.ts"
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^25.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@earendil-works/pi-tui": "^0.75.4",
+    "typebox": "latest",
+    "vitest": "latest"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm typecheck && vitest run",
+    "vitest": "vitest run"
   }
 }
