@@ -21,7 +21,7 @@ pi install /Users/benjaminkoop/code/pi/the-watch
 
 ### `/vette [pr|branch|url]`
 
-Runs the beta diff review by default: eight lightweight topic agents review the
+Runs the beta diff review by default: lightweight topic agents review the
 current worktree, selected PR, or selected branch, then the parent session
 deduplicates candidate findings, verifies actionable items, and posts verified
 PR comments when a PR target is available. Launch status and `/vette models`
@@ -90,6 +90,11 @@ Default topic roles and thinking levels:
 | Async/state | `high` | Detect race, lifecycle, and stale-state risk. |
 | Naming | `off` | Apply deterministic lint/rules only. |
 | Maintainability | `medium` | Detect review-worthy complexity, not style. |
+| Requirements/Linear | `medium` | Compare Linear requirements against the diff and flag gaps or ambiguity. |
+
+The requirements lane looks up the branch or PR's Linear issue when available and
+includes the ticket context in the review bundle. If no Linear issue can be found,
+it reports uncertainty instead of inventing requirements.
 
 `Security/data` and `Async/state` require two clean lightweight model results before
 accepting an empty finding set; if the first model reports no findings, beta runs
@@ -136,7 +141,8 @@ Vette beta reads optional user config from `~/.pi/agent/the-watch.json`:
       "contracts": "medium",
       "async-state": "high",
       "naming": "off",
-      "maintainability": "medium"
+      "maintainability": "medium",
+      "requirements": "medium"
     }
   }
 }

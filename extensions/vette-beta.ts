@@ -83,6 +83,8 @@ export type VetteBetaReviewTarget = {
 	baseRef?: string;
 	prNumber?: number;
 	prUrl?: string;
+	title?: string;
+	body?: string;
 };
 
 export type VetteBetaRunResult = {
@@ -158,6 +160,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 			"async-state": "high",
 			naming: "off",
 			maintainability: "medium",
+			requirements: "medium",
 		},
 	},
 };
@@ -210,6 +213,12 @@ export const VETTE_BETA_TOPICS: VetteBetaTopic[] = [
 		label: "Maintainability",
 		prompt:
 			"Detect review-worthy complexity only: unnecessary complexity, duplicated logic, poor boundaries, or simpler alternatives that materially reduce risk; do not report style-only issues.",
+	},
+	{
+		id: "requirements",
+		label: "Requirements/Linear",
+		prompt:
+			"Detect requirement coverage gaps only: compare the Linear requirements context against the diff and changed-code behavior; report missing acceptance criteria, unclear scope matches, implementation gaps, or requirement ambiguity that needs human review.",
 	},
 ];
 
@@ -884,6 +893,67 @@ function truncateText(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} chars]`;
 }
 
+function extractLinearIssueIds(...values: Array<string | undefined>): string[] {
+	const ids = new Set<string>();
+	for (const value of values) {
+		for (const match of value?.matchAll(/\b[A-Z][A-Z0-9]{1,10}-\d+\b/g) ?? []) {
+			ids.add(match[0]);
+		}
+	}
+	return [...ids];
+}
+
+async function buildLinearRequirementsContext(input: {
+	exec: ExecLike;
+	cwd: string;
+	target?: VetteBetaReviewTarget;
+	pr?: GhSnapshot["pr"];
+}): Promise<string> {
+	const inferredIssueId = await firstSuccessful([
+		() => execText(input.exec, input.cwd, "linear", ["issue", "id"]),
+	]);
+	const issueIds = extractLinearIssueIds(
+		input.target?.label,
+		input.target?.headRef,
+		input.target?.title,
+		input.target?.body,
+		input.pr?.kind === "pr" ? input.pr.branch : undefined,
+		inferredIssueId,
+	);
+
+	const issueViews = await Promise.all(
+		issueIds.slice(0, 5).map(async (issueId) => {
+			const body = await firstSuccessful([
+				() => execText(input.exec, input.cwd, "linear", ["issue", "view", issueId]),
+			]);
+			return body ? `## ${issueId}\n${body}` : `## ${issueId}\n<not available from linear issue view>`;
+		}),
+	);
+	if (issueViews.length > 0) {
+		return [
+			"Linear requirements:",
+			`Issue IDs: ${issueIds.join(", ")}`,
+			"",
+			truncateText(issueViews.join("\n\n"), 12_000),
+		].join("\n");
+	}
+
+	const inferredView = await firstSuccessful([
+		() => execText(input.exec, input.cwd, "linear", ["issue", "view"]),
+	]);
+	if (inferredView) {
+		return ["Linear requirements:", truncateText(inferredView, 12_000)].join(
+			"\n",
+		);
+	}
+
+	return [
+		"Linear requirements:",
+		"<none found>",
+		"No Linear issue ID was found in the branch, PR metadata, or `linear issue id`, or the Linear CLI was unavailable. The requirements lane should report uncertainty rather than invent requirements.",
+	].join("\n");
+}
+
 type DiffParts = {
 	status: string;
 	stat: string;
@@ -1043,6 +1113,12 @@ export async function buildVetteBetaDiffBundle(input: {
 			]
 		: baseParts;
 	const rangeLabel = prDiffParts?.rangeLabel ?? rangeArgs.join("..");
+	const requirementsContext = await buildLinearRequirementsContext({
+		exec: input.exec,
+		cwd: input.cwd,
+		...(input.target ? { target: input.target } : {}),
+		...(input.snapshot ? { pr: input.snapshot.pr } : {}),
+	});
 	return [
 		`Repository: ${input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.repo.fullName : "<unknown>"}`,
 		`Target: ${input.target?.label ?? (requestedHeadRef === "HEAD" ? "current worktree" : requestedHeadRef)}`,
@@ -1060,6 +1136,8 @@ export async function buildVetteBetaDiffBundle(input: {
 		"",
 		"Diff stat:",
 		stat || "<none>",
+		"",
+		requirementsContext,
 		"",
 		"Diff:",
 		truncateText(diff || "<empty diff>", MAX_DIFF_CHARS),

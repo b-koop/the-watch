@@ -50,6 +50,18 @@ function fakeContext(modelRegistry?: unknown): ExtensionCommandContext {
 function fakeExec(): ExtensionAPI["exec"] {
 	return vi.fn(async (command: string, args: string[]) => {
 		const joined = args.join(" ");
+		if (command === "linear" && joined === "issue id") {
+			return { code: 0, stdout: "ENG-123\n", stderr: "", killed: false };
+		}
+		if (command === "linear" && joined === "issue view ENG-123") {
+			return {
+				code: 0,
+				stdout:
+					"ENG-123 Add beta review\nAcceptance criteria:\n- Show requirements gaps\n",
+				stderr: "",
+				killed: false,
+			};
+		}
 		if (command === "gh" && joined.includes("--name-only")) {
 			return {
 				code: 0,
@@ -120,6 +132,7 @@ describe("vette beta config", () => {
 			"async-state": "high",
 			naming: "off",
 			maintainability: "medium",
+			requirements: "medium",
 		});
 	});
 
@@ -153,6 +166,7 @@ describe("vette beta config", () => {
 
 		expect(config.vetteBeta.topicThinking.naming).toBe("minimal");
 		expect(config.vetteBeta.topicThinking.maintainability).toBe("medium");
+		expect(config.vetteBeta.topicThinking.requirements).toBe("medium");
 	});
 
 	it("reports missing models when the model registry can validate selectors", () => {
@@ -466,7 +480,7 @@ describe("vette beta fallback runner", () => {
 });
 
 describe("vette beta review integration", () => {
-	it("builds one diff bundle and runs all eight topic agents", async () => {
+	it("builds one diff bundle and runs all topic agents", async () => {
 		const config = parseVetteBetaConfig(
 			JSON.stringify({
 				modelPools: {
@@ -492,7 +506,9 @@ describe("vette beta review integration", () => {
 		expect(result.startedAt).toMatch(/T/);
 		expect(result.finishedAt).toMatch(/T/);
 		expect(result.durationMs).toBeGreaterThanOrEqual(0);
-		expect(runner).toHaveBeenCalledTimes(8);
+		expect(result.bundle).toContain("Linear requirements:");
+		expect(result.bundle).toContain("ENG-123 Add beta review");
+		expect(runner).toHaveBeenCalledTimes(VETTE_BETA_TOPICS.length);
 		expect(vi.mocked(exec)).toHaveBeenCalledWith(
 			"git",
 			expect.arrayContaining(["diff", "--unified=80"]),
@@ -561,6 +577,8 @@ describe("vette beta review integration", () => {
 
 		expect(bundle).toContain("Range: base..HEAD");
 		expect(bundle).toContain("M\textensions/gh-status/watch.ts");
+		expect(bundle).toContain("Linear requirements:");
+		expect(bundle).toContain("Acceptance criteria:");
 		expect(bundle).toContain("diff --git");
 	});
 

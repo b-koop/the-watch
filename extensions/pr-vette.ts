@@ -836,6 +836,8 @@ async function resolveVetteBetaTarget(
 			...(prContext.pr.baseRefName
 				? { baseRef: `origin/${prContext.pr.baseRefName}` }
 				: {}),
+			...(prContext.pr.title ? { title: prContext.pr.title } : {}),
+			...(prContext.pr.body ? { body: prContext.pr.body } : {}),
 			prNumber: prContext.pr.number,
 			prUrl: prContext.pr.url,
 		};
@@ -858,7 +860,8 @@ async function dispatchVetteBetaPrompt(
 ): Promise<void> {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	const firstToken = tokens[0]?.toLowerCase();
-	const action = firstToken === "beta" ? (tokens[1] ?? "now") : (tokens[0] ?? "now");
+	const action =
+		firstToken === "beta" ? (tokens[1] ?? "now") : (tokens[0] ?? "now");
 	const config = await loadVetteBetaConfig();
 	if (action === "models") {
 		ctx.ui.notify(
