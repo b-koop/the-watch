@@ -4,6 +4,15 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+	VetteBetaCooldown,
+	formatResolvedModelPool,
+	formatVetteBetaSynthesisPrompt,
+	loadVetteBetaConfig,
+	resolveModelPool,
+	runVetteBetaReview,
+	type VetteBetaReviewTarget,
+} from "./vette-beta.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -120,6 +129,14 @@ const GH_PR_FIELDS = [
 
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function formatModelConnection(selector: string): string {
+	const slash = selector.indexOf("/");
+	if (slash <= 0 || slash === selector.length - 1) {
+		return `connection=${selector} model=${selector}`;
+	}
+	return `connection=${selector.slice(0, slash)} model=${selector.slice(slash + 1)}`;
 }
 
 function parseArgs(args: string): {
@@ -804,6 +821,94 @@ async function dispatchVettePrompt(
 	}
 }
 
+async function resolveVetteBetaTarget(
+	targetArg: string | undefined,
+	cwd: string,
+): Promise<VetteBetaReviewTarget | undefined> {
+	const selector = !targetArg || targetArg === "now" ? "" : targetArg;
+	try {
+		const prContext = await resolvePrContext(selector, cwd);
+		return {
+			label: `PR #${prContext.pr.number}`,
+			...(prContext.pr.headRefName
+				? { headRef: prContext.pr.headRefName }
+				: {}),
+			...(prContext.pr.baseRefName
+				? { baseRef: `origin/${prContext.pr.baseRefName}` }
+				: {}),
+			prNumber: prContext.pr.number,
+			prUrl: prContext.pr.url,
+		};
+	} catch {
+		if (!selector) return undefined;
+		const baseBranch = await getDefaultBaseBranch(cwd);
+		return {
+			label: `branch ${selector}`,
+			headRef: selector,
+			baseRef: `origin/${baseBranch}`,
+		};
+	}
+}
+
+async function dispatchVetteBetaPrompt(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+	cooldown: VetteBetaCooldown,
+): Promise<void> {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	const firstToken = tokens[0]?.toLowerCase();
+	const action = firstToken === "beta" ? (tokens[1] ?? "now") : (tokens[0] ?? "now");
+	const config = await loadVetteBetaConfig();
+	if (action === "models") {
+		ctx.ui.notify(
+			formatResolvedModelPool({
+				config,
+				modelRegistry: (ctx as unknown as { modelRegistry?: unknown })
+					.modelRegistry as
+					| undefined
+					| Parameters<typeof formatResolvedModelPool>[0]["modelRegistry"],
+			}),
+			"info",
+		);
+		return;
+	}
+	const target = await resolveVetteBetaTarget(action, ctx.cwd);
+	const resolvedPool = resolveModelPool({
+		config,
+		modelRegistry: (ctx as unknown as { modelRegistry?: unknown })
+			.modelRegistry as
+			| undefined
+			| Parameters<typeof resolveModelPool>[0]["modelRegistry"],
+	});
+	const firstLaunchModel =
+		resolvedPool.entries.find((entry) => entry.availability !== "missing") ??
+		resolvedPool.entries[0];
+	const modelSummary = firstLaunchModel
+		? `${formatModelConnection(firstLaunchModel.model)} from pool '${resolvedPool.poolName}'`
+		: `pool '${resolvedPool.poolName}' has no usable models`;
+
+	ctx.ui.notify(
+		`/vette: building diff bundle for ${target?.label ?? "current worktree"}; launching lightweight topic agents with ${modelSummary}`,
+		"info",
+	);
+	const result = await runVetteBetaReview({
+		ctx,
+		pi,
+		config,
+		cooldown,
+		...(target ? { target } : {}),
+	});
+	pi.sendMessage(
+		{
+			customType: "the-watch-vette-beta-result",
+			content: formatVetteBetaSynthesisPrompt(result),
+			display: true,
+		},
+		{ triggerTurn: true },
+	);
+}
+
 async function dispatchPrPrompt(
 	pi: ExtensionAPI,
 	args: string,
@@ -982,9 +1087,11 @@ function buildPrCommandStatus(
 	};
 }
 
+// fallow-ignore-next-line unused-export -- Pi extension entrypoint loaded from package.json
 export default function (pi: ExtensionAPI) {
 	let currentStatus: CommandStatus | undefined;
 	let statusTimer: ReturnType<typeof setInterval> | undefined;
+	const vetteBetaCooldown = new VetteBetaCooldown();
 
 	function stopStatusTimer(): void {
 		if (statusTimer) clearInterval(statusTimer);
@@ -1062,15 +1169,21 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("vette", {
 		description:
-			"Vette PRs or broader scopes; scope mode writes verified bug-ticket drafts locally.",
+			"Run lightweight beta diff agents by default. Use /vette old for the legacy PR/scope workflow.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			await dispatchVettePrompt(
-				pi,
-				args,
-				ctx,
-				(vetteCommandContext, _parsed, options) =>
-					setVetteCommandStatus(ctx, vetteCommandContext, options),
-			);
+			const tokens = args.trim().split(/\s+/).filter(Boolean);
+			const subcommand = tokens[0]?.toLowerCase();
+			if (subcommand === "old") {
+				await dispatchVettePrompt(
+					pi,
+					tokens.slice(1).join(" "),
+					ctx,
+					(vetteCommandContext, _parsed, options) =>
+						setVetteCommandStatus(ctx, vetteCommandContext, options),
+				);
+				return;
+			}
+			await dispatchVetteBetaPrompt(pi, args, ctx, vetteBetaCooldown);
 		},
 	});
 

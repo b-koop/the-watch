@@ -19,16 +19,27 @@ pi install /Users/benjaminkoop/code/pi/the-watch
 
 ## Commands
 
-### `/vette [pr|branch|url|scope] [--scope] [--post-comments]`
+### `/vette [pr|branch|url]`
 
-Resolves a GitHub pull request with one bundled `gh pr view`, infers owner mode
-from local non-merge commit authors on a locally available branch, then
-dispatches the right agent workflow. If no matching local commit evidence is
-available, `/vette` defaults to external-review mode. If the selector is not a
-PR number or URL and cannot be resolved as a PR, `/vette` treats it as a broader
-scope such as a service, module, package,
-directory, route group, job, or subsystem. Use `--scope` to force scope mode;
-`/vette --scope` audits the current worktree.
+Runs the beta diff review by default: eight lightweight topic agents review the
+current worktree, selected PR, or selected branch, then the parent session
+deduplicates candidate findings, verifies actionable items, and posts verified
+PR comments when a PR target is available. Launch status and `/vette models`
+both state each selected provider connection and model ID, then flag missing
+model selectors when Pi can validate them. The result message reports start time,
+finish time, elapsed duration, aggregate input/output tokens, and per-topic
+attempt metrics when Pi exposes token usage.
+
+### `/vette old [pr|branch|url|scope] [--scope] [--post-comments]`
+
+Runs the legacy PR/scope workflow. It resolves a GitHub pull request with one
+bundled `gh pr view`, infers owner mode from local non-merge commit authors on a
+locally available branch, then dispatches the right agent workflow. If no
+matching local commit evidence is available, `/vette old` defaults to
+external-review mode. If the selector is not a PR number or URL and cannot be
+resolved as a PR, `/vette old` treats it as a broader scope such as a service,
+module, package, directory, route group, job, or subsystem. Use `--scope` to
+force scope mode; `/vette old --scope` audits the current worktree.
 
 - **Owner PR**: repair mode. It does not draft/post comments; it asks the agent
   to run vette/pr-review style investigation and repair confirmed findings with
@@ -62,6 +73,78 @@ write findings and bug-ticket drafts under `/tmp/pi-vette-bug-drafts/<scope>/`.
 These artifacts record every candidate finding from every lane, including
 verified, rejected, duplicate, out-of-scope, test-reproduced, untestable, and
 blocked items, so later runs can reference the full review history.
+
+`/vette beta` remains as a compatibility alias for the default `/vette` beta
+review. `/vette beta <pr-or-branch>` and `/vette beta models` behave the same as
+`/vette <pr-or-branch>` and `/vette models`.
+
+Default topic roles and thinking levels:
+
+| Section | Thinking | Role |
+| --- | --- | --- |
+| Correctness | `medium` | Detect behavior regressions only. |
+| Tests | `low` | Detect missing assertions and false confidence. |
+| Error handling | `medium` | Detect unhandled failure paths. |
+| Security/data | `high` | Detect auth, data, and validation risk. |
+| Contracts | `medium` | Detect public compatibility changes. |
+| Async/state | `high` | Detect race, lifecycle, and stale-state risk. |
+| Naming | `off` | Apply deterministic lint/rules only. |
+| Maintainability | `medium` | Detect review-worthy complexity, not style. |
+
+`Security/data` and `Async/state` require two clean lightweight model results before
+accepting an empty finding set; if the first model reports no findings, beta runs
+the next cheap fallback model to look for possible risks before declaring the
+topic clean.
+
+Vette beta reads optional user config from `~/.pi/agent/the-watch.json`:
+
+```json
+{
+  "modelPools": {
+    "light": [
+      {
+        "model": "cursor/gemini-3-flash",
+        "thinking": "off",
+        "timeoutMs": 90000
+      },
+      {
+        "model": "cursor/gpt-5-mini",
+        "thinking": "off",
+        "timeoutMs": 90000
+      },
+      {
+        "model": "cursor/default",
+        "thinking": "off",
+        "timeoutMs": 90000
+      },
+      {
+        "model": "ollama/ornith:9b",
+        "thinking": "off",
+        "timeoutMs": 180000
+      }
+    ]
+  },
+  "vetteBeta": {
+    "modelPool": "light",
+    "maxParallel": 8,
+    "tools": ["read", "grep", "find", "ls"],
+    "topicThinking": {
+      "correctness": "medium",
+      "tests": "low",
+      "error-handling": "medium",
+      "security-data": "high",
+      "contracts": "medium",
+      "async-state": "high",
+      "naming": "off",
+      "maintainability": "medium"
+    }
+  }
+}
+```
+
+Ordering is array order: each topic tries the first model, falls back to later
+models on provider/model/transient failure, and briefly cools down failed
+providers/models so later topic agents skip options that are likely down.
 
 ### `/pr [pr|branch|url] [--post-comments] [--no-watch]`
 
@@ -111,7 +194,6 @@ investigation turn when new work appears. The subcommand autocompletes after
 - `/watch stop` stops monitoring and clears the watch footer status.
 - `/watch now` runs an immediate check and restarts the wait for the next
   automatic check.
-
 Watch mode detects merge conflicts, failed checks, human comments/reviews, and
 BugBot activity. It prioritizes merge conflicts, human feedback, pipeline
 failures, then BugBot items. New findings are recorded in the session and routed
