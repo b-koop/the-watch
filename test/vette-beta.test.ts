@@ -62,6 +62,26 @@ function fakeExec(): ExtensionAPI["exec"] {
 				killed: false,
 			};
 		}
+		if (command === "git" && joined.startsWith("ls-files")) {
+			return {
+				code: 0,
+				stdout: "features/watch-review.feature\n",
+				stderr: "",
+				killed: false,
+			};
+		}
+		if (
+			command === "git" &&
+			joined === "show HEAD:features/watch-review.feature"
+		) {
+			return {
+				code: 0,
+				stdout:
+					"Feature: Watch review\n\n  Scenario: Changed watch behavior is reviewed\n    Given changed watch behavior\n    When vette reviews the branch\n    Then behavior gaps are reported\n",
+				stderr: "",
+				killed: false,
+			};
+		}
 		if (command === "gh" && joined.includes("--name-only")) {
 			return {
 				code: 0,
@@ -120,10 +140,13 @@ describe("vette beta config", () => {
 			"find",
 			"ls",
 		]);
-		expect(parseVetteBetaConfig("{}").modelPools.light[0].model).toBe(
+		const defaultConfig = parseVetteBetaConfig("{}");
+		expect(defaultConfig.modelPools.light[0].model).toBe(
 			"cursor/gemini-3-flash",
 		);
-		expect(parseVetteBetaConfig("{}").vetteBeta.topicThinking).toMatchObject({
+		expect(defaultConfig.modelPools.light[0].timeoutMs).toBe(180_000);
+		expect(defaultConfig.modelPools.light[3].timeoutMs).toBe(600_000);
+		expect(defaultConfig.vetteBeta.topicThinking).toMatchObject({
 			correctness: "medium",
 			tests: "low",
 			"error-handling": "medium",
@@ -133,6 +156,7 @@ describe("vette beta config", () => {
 			naming: "off",
 			maintainability: "medium",
 			requirements: "medium",
+			"behavior-specs": "medium",
 		});
 	});
 
@@ -157,6 +181,20 @@ describe("vette beta config", () => {
 		expect(config.vetteBeta.tools).toEqual(["read"]);
 	});
 
+	it("defaults remote models to three minutes and local models to ten minutes", () => {
+		const config = parseVetteBetaConfig(
+			JSON.stringify({
+				modelPools: {
+					light: [{ model: "provider/remote" }, { model: "ollama/local" }],
+				},
+			}),
+		);
+
+		expect(config.modelPools.light.map((entry) => entry.timeoutMs)).toEqual([
+			180_000, 600_000,
+		]);
+	});
+
 	it("allows topic thinking overrides while preserving defaults", () => {
 		const config = parseVetteBetaConfig(
 			JSON.stringify({
@@ -167,6 +205,7 @@ describe("vette beta config", () => {
 		expect(config.vetteBeta.topicThinking.naming).toBe("minimal");
 		expect(config.vetteBeta.topicThinking.maintainability).toBe("medium");
 		expect(config.vetteBeta.topicThinking.requirements).toBe("medium");
+		expect(config.vetteBeta.topicThinking["behavior-specs"]).toBe("medium");
 	});
 
 	it("reports missing models when the model registry can validate selectors", () => {
@@ -508,6 +547,8 @@ describe("vette beta review integration", () => {
 		expect(result.durationMs).toBeGreaterThanOrEqual(0);
 		expect(result.bundle).toContain("Linear requirements:");
 		expect(result.bundle).toContain("ENG-123 Add beta review");
+		expect(result.bundle).toContain("Behavior specs:");
+		expect(result.bundle).toContain("Feature: Watch review");
 		expect(runner).toHaveBeenCalledTimes(VETTE_BETA_TOPICS.length);
 		expect(vi.mocked(exec)).toHaveBeenCalledWith(
 			"git",
@@ -532,6 +573,7 @@ describe("vette beta review integration", () => {
 			startedAt: "2026-07-02T10:00:00.000Z",
 			finishedAt: "2026-07-02T10:00:03.000Z",
 			durationMs: 3000,
+			reviewMode: "comment",
 			results: [
 				{
 					topic,
@@ -569,6 +611,34 @@ describe("vette beta review integration", () => {
 		);
 	});
 
+	it("formats owned self reviews as repair work instead of comments", async () => {
+		const prompt = formatVetteBetaSynthesisPrompt({
+			poolName: "light",
+			resolvedPool: [],
+			bundle: "diff",
+			startedAt: "2026-07-02T10:00:00.000Z",
+			finishedAt: "2026-07-02T10:00:03.000Z",
+			durationMs: 3000,
+			reviewMode: "repair",
+			results: [{ topic, attempts: [], ok: true, output: "{}" }],
+			target: {
+				label: "PR #123",
+				prNumber: 123,
+				prUrl: "https://github.com/o/r/pull/123",
+				reviewMode: "repair",
+			},
+		});
+
+		expect(prompt).toContain("Mode: owned/self repair");
+		expect(prompt).toContain("Do not post or draft PR review comments");
+		expect(prompt).toContain(
+			"fix confirmed issues directly in the working tree",
+		);
+		expect(prompt).not.toContain(
+			"post verified findings to https://github.com/o/r/pull/123",
+		);
+	});
+
 	it("builds a compact diff bundle from git output", async () => {
 		const bundle = await buildVetteBetaDiffBundle({
 			exec: fakeExec(),
@@ -579,6 +649,8 @@ describe("vette beta review integration", () => {
 		expect(bundle).toContain("M\textensions/gh-status/watch.ts");
 		expect(bundle).toContain("Linear requirements:");
 		expect(bundle).toContain("Acceptance criteria:");
+		expect(bundle).toContain("Behavior specs:");
+		expect(bundle).toContain("features/watch-review.feature");
 		expect(bundle).toContain("diff --git");
 	});
 

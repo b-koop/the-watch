@@ -11,6 +11,7 @@ import {
 	loadVetteBetaConfig,
 	resolveModelPool,
 	runVetteBetaReview,
+	type VetteBetaReviewMode,
 	type VetteBetaReviewTarget,
 } from "./vette-beta.ts";
 
@@ -838,6 +839,7 @@ async function resolveVetteBetaTarget(
 				: {}),
 			...(prContext.pr.title ? { title: prContext.pr.title } : {}),
 			...(prContext.pr.body ? { body: prContext.pr.body } : {}),
+			reviewMode: prContext.isOwner ? "repair" : "comment",
 			prNumber: prContext.pr.number,
 			prUrl: prContext.pr.url,
 		};
@@ -862,6 +864,7 @@ async function dispatchVetteBetaPrompt(
 	const firstToken = tokens[0]?.toLowerCase();
 	const action =
 		firstToken === "beta" ? (tokens[1] ?? "now") : (tokens[0] ?? "now");
+	const isSelfReview = action === "self";
 	const config = await loadVetteBetaConfig();
 	if (action === "models") {
 		ctx.ui.notify(
@@ -876,7 +879,12 @@ async function dispatchVetteBetaPrompt(
 		);
 		return;
 	}
-	const target = await resolveVetteBetaTarget(action, ctx.cwd);
+	const target = isSelfReview
+		? undefined
+		: await resolveVetteBetaTarget(action, ctx.cwd);
+	const reviewMode: VetteBetaReviewMode = isSelfReview
+		? "repair"
+		: (target?.reviewMode ?? "comment");
 	const resolvedPool = resolveModelPool({
 		config,
 		modelRegistry: (ctx as unknown as { modelRegistry?: unknown })
@@ -892,7 +900,7 @@ async function dispatchVetteBetaPrompt(
 		: `pool '${resolvedPool.poolName}' has no usable models`;
 
 	ctx.ui.notify(
-		`/vette: building diff bundle for ${target?.label ?? "current worktree"}; launching lightweight topic agents with ${modelSummary}`,
+		`/vette: building diff bundle for ${target?.label ?? (isSelfReview ? "current branch self-review" : "current worktree")}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}`,
 		"info",
 	);
 	const result = await runVetteBetaReview({
@@ -900,6 +908,7 @@ async function dispatchVetteBetaPrompt(
 		pi,
 		config,
 		cooldown,
+		reviewMode,
 		...(target ? { target } : {}),
 	});
 	pi.sendMessage(

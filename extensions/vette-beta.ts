@@ -77,6 +77,8 @@ export type VetteBetaTopicResult = {
 	errorMessage?: string;
 };
 
+export type VetteBetaReviewMode = "comment" | "repair";
+
 export type VetteBetaReviewTarget = {
 	label: string;
 	headRef?: string;
@@ -85,6 +87,7 @@ export type VetteBetaReviewTarget = {
 	prUrl?: string;
 	title?: string;
 	body?: string;
+	reviewMode?: VetteBetaReviewMode;
 };
 
 export type VetteBetaRunResult = {
@@ -95,6 +98,7 @@ export type VetteBetaRunResult = {
 	startedAt: string;
 	finishedAt: string;
 	durationMs: number;
+	reviewMode: VetteBetaReviewMode;
 	target?: VetteBetaReviewTarget;
 };
 
@@ -132,7 +136,8 @@ type ModelRegistryLike = {
 
 type ExecLike = ExtensionAPI["exec"];
 
-const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_TIMEOUT_MS = 3 * 60_000;
+const LOCAL_MODEL_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
@@ -141,10 +146,26 @@ const THE_WATCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "the-watch.json");
 export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 	modelPools: {
 		light: [
-			{ model: "cursor/gemini-3-flash", thinking: "off", timeoutMs: 90_000 },
-			{ model: "cursor/gpt-5-mini", thinking: "off", timeoutMs: 90_000 },
-			{ model: "cursor/default", thinking: "off", timeoutMs: 90_000 },
-			{ model: "ollama/ornith:9b", thinking: "off", timeoutMs: 180_000 },
+			{
+				model: "cursor/gemini-3-flash",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			{
+				model: "cursor/gpt-5-mini",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			{
+				model: "cursor/default",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			{
+				model: "ollama/ornith:9b",
+				thinking: "off",
+				timeoutMs: LOCAL_MODEL_TIMEOUT_MS,
+			},
 		],
 	},
 	vetteBeta: {
@@ -161,6 +182,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 			naming: "off",
 			maintainability: "medium",
 			requirements: "medium",
+			"behavior-specs": "medium",
 		},
 	},
 };
@@ -220,6 +242,12 @@ export const VETTE_BETA_TOPICS: VetteBetaTopic[] = [
 		prompt:
 			"Detect requirement coverage gaps only: compare the Linear requirements context against the diff and changed-code behavior; report missing acceptance criteria, unclear scope matches, implementation gaps, or requirement ambiguity that needs human review.",
 	},
+	{
+		id: "behavior-specs",
+		label: "Feature behavior specs",
+		prompt:
+			"Detect behavior-spec drift only: compare matching Gherkin/feature-file scenarios against the diff and changed-code behavior; report behavior that violates scenarios, missing scenario coverage for changed behavior, or ambiguous spec matches that need review.",
+	},
 ];
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -236,15 +264,27 @@ function isModelEntry(value: unknown): value is VetteBetaModelEntry {
 	);
 }
 
+function isLocalModelSelector(selector: string): boolean {
+	return /^(ollama|lmstudio|local)\//i.test(selector.trim());
+}
+
+function defaultTimeoutForModel(selector: string): number {
+	return isLocalModelSelector(selector)
+		? LOCAL_MODEL_TIMEOUT_MS
+		: DEFAULT_TIMEOUT_MS;
+}
+
 function normalizeModelEntry(entry: VetteBetaModelEntry): VetteBetaModelEntry {
+	const model = entry.model.trim();
+	const defaultTimeoutMs = defaultTimeoutForModel(model);
 	return {
-		model: entry.model.trim(),
+		model,
 		thinking: entry.thinking?.trim() || "off",
 		timeoutMs:
 			Number.isFinite(entry.timeoutMs ?? Number.NaN) &&
 			(entry.timeoutMs ?? 0) > 0
-				? Math.round(entry.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-				: DEFAULT_TIMEOUT_MS,
+				? Math.round(entry.timeoutMs ?? defaultTimeoutMs)
+				: defaultTimeoutMs,
 	};
 }
 
@@ -903,6 +943,25 @@ function extractLinearIssueIds(...values: Array<string | undefined>): string[] {
 	return [...ids];
 }
 
+function tokensFrom(text: string): string[] {
+	const stopWords = new Set([
+		"from",
+		"this",
+		"that",
+		"with",
+		"when",
+		"then",
+		"given",
+		"and",
+		"the",
+		"for",
+		"diff",
+	]);
+	return [...new Set(text.toLowerCase().match(/[a-z0-9][a-z0-9_-]{2,}/g) ?? [])]
+		.filter((token) => !stopWords.has(token))
+		.slice(0, 80);
+}
+
 async function buildLinearRequirementsContext(input: {
 	exec: ExecLike;
 	cwd: string;
@@ -924,9 +983,12 @@ async function buildLinearRequirementsContext(input: {
 	const issueViews = await Promise.all(
 		issueIds.slice(0, 5).map(async (issueId) => {
 			const body = await firstSuccessful([
-				() => execText(input.exec, input.cwd, "linear", ["issue", "view", issueId]),
+				() =>
+					execText(input.exec, input.cwd, "linear", ["issue", "view", issueId]),
 			]);
-			return body ? `## ${issueId}\n${body}` : `## ${issueId}\n<not available from linear issue view>`;
+			return body
+				? `## ${issueId}\n${body}`
+				: `## ${issueId}\n<not available from linear issue view>`;
 		}),
 	);
 	if (issueViews.length > 0) {
@@ -951,6 +1013,77 @@ async function buildLinearRequirementsContext(input: {
 		"Linear requirements:",
 		"<none found>",
 		"No Linear issue ID was found in the branch, PR metadata, or `linear issue id`, or the Linear CLI was unavailable. The requirements lane should report uncertainty rather than invent requirements.",
+	].join("\n");
+}
+
+async function buildBehaviorSpecsContext(input: {
+	exec: ExecLike;
+	cwd: string;
+	status: string;
+	diff: string;
+}): Promise<string> {
+	const listed = await firstSuccessful([
+		() =>
+			execText(input.exec, input.cwd, "git", [
+				"ls-files",
+				"--",
+				"*.feature",
+				":(glob)**/*.feature",
+				"*.feature.md",
+				":(glob)**/*.feature.md",
+			]),
+	]);
+	const paths = [
+		...new Set(
+			listed
+				.split("\n")
+				.map((line) => line.trim())
+				.filter(Boolean),
+		),
+	];
+	if (paths.length === 0) {
+		return [
+			"Behavior specs:",
+			"<none found>",
+			"No .feature or .feature.md files were found, so the behavior-specs lane should not invent scenario expectations.",
+		].join("\n");
+	}
+
+	const signalTokens = tokensFrom(`${input.status}\n${input.diff}`);
+	const specs = await Promise.all(
+		paths.slice(0, 50).map(async (path) => {
+			const body = await firstSuccessful([
+				() => execText(input.exec, input.cwd, "git", ["show", `HEAD:${path}`]),
+				() => execText(input.exec, input.cwd, "cat", [path]),
+			]);
+			const haystack = `${path}\n${body}`.toLowerCase();
+			const score = signalTokens.reduce(
+				(total, token) => total + (haystack.includes(token) ? 1 : 0),
+				0,
+			);
+			return { path, body, score };
+		}),
+	);
+	const matched = specs
+		.filter((spec) => spec.score > 0 && spec.body.trim())
+		.sort((left, right) => right.score - left.score)
+		.slice(0, 5);
+	if (matched.length === 0) {
+		return [
+			"Behavior specs:",
+			`Feature files found: ${paths.slice(0, 20).join(", ")}`,
+			"No obvious lexical match was found against the changed files or diff. The behavior-specs lane should report uncertainty unless it can justify a relevant scenario match.",
+		].join("\n");
+	}
+
+	return [
+		"Behavior specs:",
+		`Matched feature files: ${matched.map((spec) => `${spec.path} (score ${spec.score})`).join(", ")}`,
+		"",
+		truncateText(
+			matched.map((spec) => `## ${spec.path}\n${spec.body}`).join("\n\n"),
+			12_000,
+		),
 	].join("\n");
 }
 
@@ -1113,12 +1246,20 @@ export async function buildVetteBetaDiffBundle(input: {
 			]
 		: baseParts;
 	const rangeLabel = prDiffParts?.rangeLabel ?? rangeArgs.join("..");
-	const requirementsContext = await buildLinearRequirementsContext({
-		exec: input.exec,
-		cwd: input.cwd,
-		...(input.target ? { target: input.target } : {}),
-		...(input.snapshot ? { pr: input.snapshot.pr } : {}),
-	});
+	const [requirementsContext, behaviorSpecsContext] = await Promise.all([
+		buildLinearRequirementsContext({
+			exec: input.exec,
+			cwd: input.cwd,
+			...(input.target ? { target: input.target } : {}),
+			...(input.snapshot ? { pr: input.snapshot.pr } : {}),
+		}),
+		buildBehaviorSpecsContext({
+			exec: input.exec,
+			cwd: input.cwd,
+			status,
+			diff,
+		}),
+	]);
 	return [
 		`Repository: ${input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.repo.fullName : "<unknown>"}`,
 		`Target: ${input.target?.label ?? (requestedHeadRef === "HEAD" ? "current worktree" : requestedHeadRef)}`,
@@ -1139,6 +1280,8 @@ export async function buildVetteBetaDiffBundle(input: {
 		"",
 		requirementsContext,
 		"",
+		behaviorSpecsContext,
+		"",
 		"Diff:",
 		truncateText(diff || "<empty diff>", MAX_DIFF_CHARS),
 	].join("\n");
@@ -1152,6 +1295,7 @@ export async function runVetteBetaReview(input: {
 	runner?: PiAgentRunner;
 	snapshot?: GhSnapshot;
 	target?: VetteBetaReviewTarget;
+	reviewMode?: VetteBetaReviewMode;
 	topics?: VetteBetaTopic[];
 }): Promise<VetteBetaRunResult> {
 	const startedMs = Date.now();
@@ -1194,6 +1338,7 @@ export async function runVetteBetaReview(input: {
 		startedAt,
 		finishedAt: new Date(finishedMs).toISOString(),
 		durationMs: finishedMs - startedMs,
+		reviewMode: input.reviewMode ?? input.target?.reviewMode ?? "comment",
 		...(input.target ? { target: input.target } : {}),
 	};
 }
@@ -1246,9 +1391,12 @@ export function formatVetteBetaSynthesisPrompt(
 	const totalInputTokens = sumAttempts(run.results, "inputTokens");
 	const totalOutputTokens = sumAttempts(run.results, "outputTokens");
 	const hasPrTarget = Boolean(run.target?.prNumber && run.target.prUrl);
-	const commentInstruction = hasPrTarget
-		? `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`
-		: "No PR target was resolved, so do not post comments. Instead prepare comment-ready markdown with best file/line context and explain that posting requires /vette <pr>.";
+	const isRepairMode = run.reviewMode === "repair";
+	const actionInstruction = isRepairMode
+		? "This is an owned/self review. Do not post or draft PR review comments as the primary output. Verify candidates, fix confirmed issues directly in the working tree with focused changes, add or update focused tests where practical, and report fixed items plus any unresolved blockers. Do not commit."
+		: hasPrTarget
+			? `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`
+			: "No PR target was resolved, so do not post comments. Instead prepare comment-ready markdown with best file/line context and explain that posting requires /vette <pr>.";
 	const lines = [
 		`Vette beta completed ${run.results.length} lightweight topic agents using model pool '${run.poolName}'.`,
 		run.target
@@ -1257,6 +1405,7 @@ export function formatVetteBetaSynthesisPrompt(
 		`Timing: started ${run.startedAt}; finished ${run.finishedAt}; ${formatDuration(run.durationMs)}.`,
 		`Usage: ${formatTokens(totalInputTokens, totalOutputTokens)} across all topic-agent attempts.`,
 		`Succeeded: ${ok}; failed: ${failed}.`,
+		`Mode: ${isRepairMode ? "owned/self repair" : "external/comment review"}.`,
 		"",
 		"Continue the full vette workflow from these topic-agent results; do not stop at a summary.",
 		"Required next phases:",
@@ -1264,10 +1413,14 @@ export function formatVetteBetaSynthesisPrompt(
 		"2. Reject duplicate, low-confidence, and out-of-scope items with short reasons.",
 		"3. Verify each remaining actionable finding with static proof, a focused command, or a temporary failing repro test where practical.",
 		"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.",
-		`5. ${commentInstruction}`,
-		"6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.",
+		`5. ${actionInstruction}`,
+		isRepairMode
+			? "6. Finish with counts for candidates, duplicates, rejected, verified, fixed, still failing, and blocked items."
+			: "6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.",
 		"",
-		"Use this comment template for verified findings:",
+		isRepairMode
+			? "Use this repair evidence template for verified findings you fix or leave unresolved:"
+			: "Use this comment template for verified findings:",
 		"### Verified issue: <short behavior-first title>",
 		"**Location:** <path:line or path>",
 		"**Source topics:** <topic ids/models>",

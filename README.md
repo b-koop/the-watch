@@ -23,12 +23,17 @@ pi install /Users/benjaminkoop/code/pi/the-watch
 
 Runs the beta diff review by default: lightweight topic agents review the
 current worktree, selected PR, or selected branch, then the parent session
-deduplicates candidate findings, verifies actionable items, and posts verified
-PR comments when a PR target is available. Launch status and `/vette models`
+deduplicates candidate findings and verifies actionable items. External PRs post
+verified review comments. Owned PRs and `/vette self` run in repair mode: they do
+not post or draft review comments as the primary output, and instead fix
+confirmed issues directly in the working tree. Launch status and `/vette models`
 both state each selected provider connection and model ID, then flag missing
 model selectors when Pi can validate them. The result message reports start time,
 finish time, elapsed duration, aggregate input/output tokens, and per-topic
 attempt metrics when Pi exposes token usage.
+
+`/vette self` vets the current branch against the merge base/current merge point
+and fixes confirmed items without requiring a PR selector.
 
 ### `/vette old [pr|branch|url|scope] [--scope] [--post-comments]`
 
@@ -91,10 +96,16 @@ Default topic roles and thinking levels:
 | Naming | `off` | Apply deterministic lint/rules only. |
 | Maintainability | `medium` | Detect review-worthy complexity, not style. |
 | Requirements/Linear | `medium` | Compare Linear requirements against the diff and flag gaps or ambiguity. |
+| Feature behavior specs | `medium` | Compare matching Gherkin/feature-file scenarios against changed behavior. |
 
 The requirements lane looks up the branch or PR's Linear issue when available and
 includes the ticket context in the review bundle. If no Linear issue can be found,
 it reports uncertainty instead of inventing requirements.
+
+The feature behavior specs lane looks for tracked `.feature` and `.feature.md`
+files, includes the best lexical matches for the changed files and diff, and asks
+the lane to flag scenario drift, missing behavior coverage, or ambiguous matches.
+If no feature file matches, it reports uncertainty rather than inventing behavior.
 
 `Security/data` and `Async/state` require two clean lightweight model results before
 accepting an empty finding set; if the first model reports no findings, beta runs
@@ -110,22 +121,22 @@ Vette beta reads optional user config from `~/.pi/agent/the-watch.json`:
       {
         "model": "cursor/gemini-3-flash",
         "thinking": "off",
-        "timeoutMs": 90000
+        "timeoutMs": 180000
       },
       {
         "model": "cursor/gpt-5-mini",
         "thinking": "off",
-        "timeoutMs": 90000
+        "timeoutMs": 180000
       },
       {
         "model": "cursor/default",
         "thinking": "off",
-        "timeoutMs": 90000
+        "timeoutMs": 180000
       },
       {
         "model": "ollama/ornith:9b",
         "thinking": "off",
-        "timeoutMs": 180000
+        "timeoutMs": 600000
       }
     ]
   },
@@ -142,7 +153,8 @@ Vette beta reads optional user config from `~/.pi/agent/the-watch.json`:
       "async-state": "high",
       "naming": "off",
       "maintainability": "medium",
-      "requirements": "medium"
+      "requirements": "medium",
+      "behavior-specs": "medium"
     }
   }
 }
@@ -150,7 +162,9 @@ Vette beta reads optional user config from `~/.pi/agent/the-watch.json`:
 
 Ordering is array order: each topic tries the first model, falls back to later
 models on provider/model/transient failure, and briefly cools down failed
-providers/models so later topic agents skip options that are likely down.
+providers/models so later topic agents skip options that are likely down. Models
+without explicit `timeoutMs` default to 3 minutes, except local selectors such as
+`ollama/*`, `lmstudio/*`, or `local/*`, which default to 10 minutes.
 
 ### `/pr [pr|branch|url] [--post-comments] [--no-watch]`
 
