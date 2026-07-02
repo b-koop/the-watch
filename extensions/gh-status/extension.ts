@@ -301,7 +301,8 @@ function registerWatchCommand(
 			"Watch the current PR for blockers. Subcommands: start, status, stop, now.",
 		getArgumentCompletions: watchCompletions,
 		handler: async (args, ctx) => {
-			const [subcommand = "start"] = args.trim().split(/\s+/).filter(Boolean);
+			const tokens = args.trim().split(/\s+/).filter(Boolean);
+			const [subcommand = "start"] = tokens;
 			switch (subcommand.toLowerCase()) {
 				case "start":
 					await watchController.start(ctx);
