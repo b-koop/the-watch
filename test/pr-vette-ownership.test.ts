@@ -22,6 +22,22 @@ describe("buildVetteBetaCommandStatus", () => {
 			progress: `0/${VETTE_BETA_TOPICS.length}`,
 		});
 	});
+
+	it("shows doc vette as local findings while topic agents run", () => {
+		expect(
+			buildVetteBetaCommandStatus({
+				targetLabel: "current worktree",
+				reviewMode: "doc",
+				queued: false,
+			}),
+		).toMatchObject({
+			command: "vette",
+			target: "current worktree",
+			mode: "local doc findings",
+			phase: "working",
+			progress: `0/${VETTE_BETA_TOPICS.length}`,
+		});
+	});
 });
 
 describe("draftPrPrompt", () => {
@@ -44,9 +60,9 @@ describe("draftPrPrompt", () => {
 		);
 		expect(prompt).toContain("gh pr create --draft");
 		expect(prompt).toContain("gh pr ready");
-		expect(
-			prompt.indexOf("pushing branch and creating draft PR"),
-		).toBeLessThan(prompt.indexOf("vetting branch while draft PR"));
+		expect(prompt.indexOf("pushing branch and creating draft PR")).toBeLessThan(
+			prompt.indexOf("vetting branch while draft PR"),
+		);
 		expect(prompt).toContain("marking PR ready for review");
 	});
 });

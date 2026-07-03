@@ -27,6 +27,9 @@ The parent session deduplicates and verifies findings before acting.
 - **External PRs** — posts verified review comments to the PR.
 - **Owned PRs / `/vette self`** — repair mode. Fixes confirmed issues directly
   in your working tree instead of posting comments.
+- **`/vette doc [pr|branch|url]`** — local findings mode. Outputs findings and
+  action items locally only; it does not post PR comments, create TDD repro
+  tests, or repair code.
 - `/vette models` — shows selected providers and model IDs.
 
 #### `/vette old [pr|branch|url|scope] [--scope] [--post-comments]`
@@ -114,6 +117,7 @@ Per-topic thinking levels are also configurable via `vetteBeta.topicThinking`.
 ## Safety
 
 - External review mode only posts verified findings; unverified items stay local.
+- Doc mode never posts, repairs, or creates TDD repro tests — local findings only.
 - Scope mode never posts or creates tickets — local Markdown drafts only.
 - Owner PR repairs preserve pre-existing dirty worktree changes.
 - Non-trivial fixes are delegated to focused subagents.

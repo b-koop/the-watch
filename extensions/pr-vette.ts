@@ -907,9 +907,14 @@ async function dispatchVetteBetaPrompt(
 		allTokens.includes("--no-post") || allTokens.includes("--dry-run");
 	const tokens = allTokens.filter((token) => !token.startsWith("--"));
 	const firstToken = tokens[0]?.toLowerCase();
-	const action =
-		firstToken === "beta" ? (tokens[1] ?? "now") : (tokens[0] ?? "now");
-	const isSelfReview = action === "self";
+	const actionOffset = firstToken === "beta" ? 1 : 0;
+	const modeOrAction = tokens[actionOffset]?.toLowerCase() ?? "now";
+	const isSelfReview = modeOrAction === "self";
+	const isDocReview = modeOrAction === "doc";
+	let action = tokens[actionOffset] ?? "now";
+	if (isSelfReview || isDocReview) {
+		action = tokens[actionOffset + 1] ?? "now";
+	}
 	const config = await loadVetteBetaConfig();
 	if (action === "models") {
 		ctx.ui.notify(
@@ -936,9 +941,12 @@ async function dispatchVetteBetaPrompt(
 		);
 		return;
 	}
-	const reviewMode: VetteBetaReviewMode = isSelfReview
-		? "repair"
-		: (target?.reviewMode ?? "comment");
+	let reviewMode: VetteBetaReviewMode = target?.reviewMode ?? "comment";
+	if (isSelfReview) {
+		reviewMode = "repair";
+	} else if (isDocReview) {
+		reviewMode = "doc";
+	}
 	const resolvedPool = resolveModelPool({
 		config,
 		modelRegistry: (ctx as unknown as { modelRegistry?: unknown })
@@ -1356,13 +1364,16 @@ function renderStatus(status: CommandStatus): string {
 export function buildVetteBetaCommandStatus(
 	statusContext: VetteBetaStatusContext,
 ): CommandStatus {
+	let mode = "external/comment review";
+	if (statusContext.reviewMode === "repair") {
+		mode = "owned/self repair";
+	} else if (statusContext.reviewMode === "doc") {
+		mode = "local doc findings";
+	}
 	return {
 		command: "vette",
 		target: statusContext.targetLabel,
-		mode:
-			statusContext.reviewMode === "repair"
-				? "owned/self repair"
-				: "external/comment review",
+		mode,
 		phase: statusContext.queued ? "queued" : "working",
 		progress: statusContext.progress ?? `0/${VETTE_BETA_TOPICS.length}`,
 	};

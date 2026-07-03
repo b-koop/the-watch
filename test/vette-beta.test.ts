@@ -918,6 +918,36 @@ describe("vette beta review integration", () => {
 		);
 	});
 
+	it("formats doc reviews as local findings without TDD or comments", async () => {
+		const prompt = formatVetteBetaSynthesisPrompt({
+			poolName: "light",
+			resolvedPool: [],
+			bundle: "diff",
+			startedAt: "2026-07-02T10:00:00.000Z",
+			finishedAt: "2026-07-02T10:00:03.000Z",
+			durationMs: 3000,
+			reviewMode: "doc",
+			results: [{ topic, attempts: [], ok: true, output: "{}" }],
+			target: {
+				label: "PR #123",
+				prNumber: 123,
+				prUrl: "https://github.com/o/r/pull/123",
+			},
+		});
+
+		expect(prompt).toContain("Mode: local doc findings");
+		expect(prompt).toContain("DOC MODE (/vette doc)");
+		expect(prompt).toContain("Do not create repro tests or edit files");
+		expect(prompt).toContain("Use this local findings template");
+		expect(prompt).not.toContain("gh pr comment 123");
+		expect(prompt).not.toContain(
+			"post verified findings to https://github.com/o/r/pull/123",
+		);
+		expect(prompt).not.toContain(
+			"fix confirmed issues directly in the working tree",
+		);
+	});
+
 	it("formats owned self reviews as repair work instead of comments", async () => {
 		const prompt = formatVetteBetaSynthesisPrompt({
 			poolName: "light",

@@ -82,7 +82,7 @@ export type VetteBetaTopicResult = {
 	aborted?: boolean;
 };
 
-export type VetteBetaReviewMode = "comment" | "repair";
+export type VetteBetaReviewMode = "comment" | "repair" | "doc";
 
 export type VetteBetaReviewTarget = {
 	label: string;
@@ -1109,8 +1109,7 @@ export function groundTopicFindings(
 	};
 	const kept = findings.filter(
 		(finding) =>
-			!isObject(finding) ||
-			isGrounded((finding as { file?: unknown }).file),
+			!isObject(finding) || isGrounded((finding as { file?: unknown }).file),
 	);
 	const dropped = findings.length - kept.length;
 	if (dropped === 0) return { result, dropped: 0 };
@@ -2141,14 +2140,68 @@ export function formatVetteBetaSynthesisPrompt(
 	const totalOutputTokens = sumAttempts(run.results, "outputTokens");
 	const hasPrTarget = Boolean(run.target?.prNumber && run.target.prUrl);
 	const isRepairMode = run.reviewMode === "repair";
+	const isDocMode = run.reviewMode === "doc";
 	const noPost = options.noPost === true;
-	const actionInstruction = isRepairMode
-		? "This is an owned/self review. Do not post or draft PR review comments as the primary output. Verify candidates, fix confirmed issues directly in the working tree with focused changes, add or update focused tests where practical, and report fixed items plus any unresolved blockers. Do not commit."
-		: noPost
-			? "DRY RUN (--no-post): do not post any GitHub comments or reviews. Prepare comment-ready markdown for verified findings with best file/line context and present it in the final report only."
-			: hasPrTarget
-				? `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Use the gh CLI via your shell/bash tool to post comments. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`
-				: "No PR target was resolved, so do not post comments. Instead prepare comment-ready markdown with best file/line context and explain that posting requires /vette <pr>.";
+	let actionInstruction: string;
+	let modeLabel: string;
+	let toolsHeading = "Available tools for verification and posting:";
+	let shellToolInstruction =
+		"- Use your shell/bash tool to run commands: read files, run tests, and execute gh CLI commands.";
+	let toolInstruction: string;
+	let inlinePostInstruction = "";
+	let phaseFourInstruction: string;
+	let finishInstruction: string;
+	let templateIntro: string;
+
+	if (isRepairMode) {
+		actionInstruction =
+			"This is an owned/self review. Do not post or draft PR review comments as the primary output. Verify candidates, fix confirmed issues directly in the working tree with focused changes, add or update focused tests where practical, and report fixed items plus any unresolved blockers. Do not commit.";
+		modeLabel = "owned/self repair";
+		toolInstruction =
+			"- Use your shell/bash tool to run focused test commands and apply fixes.";
+		phaseFourInstruction =
+			"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
+		finishInstruction =
+			"6. Finish with counts for candidates, duplicates, rejected, verified, fixed, still failing, and blocked items.";
+		templateIntro =
+			"Use this repair evidence template for verified findings you fix or leave unresolved:";
+	} else if (isDocMode) {
+		actionInstruction =
+			"DOC MODE (/vette doc): produce a local-only findings report. Do not post or draft PR comments, do not modify source files, do not create temporary repro tests, and do not run a TDD repair loop. Preserve actionable items with best file/line context and mark unverified items clearly.";
+		modeLabel = "local doc findings";
+		toolsHeading = "Available tools for local verification:";
+		shellToolInstruction =
+			"- Use your shell/bash tool for read-only commands such as inspecting files or running existing checks; do not execute gh posting commands.";
+		toolInstruction =
+			"- Doc mode: inspect files and run read-only commands only; output local findings/items without posting, fixing, or creating tests.";
+		phaseFourInstruction =
+			"4. Do not create repro tests or edit files; if a finding would need TDD-style proof, mark the needed verification instead of building it.";
+		finishInstruction =
+			"6. Finish with counts for candidates, duplicates, rejected, verified, unverified items, and blocked items.";
+		templateIntro = "Use this local findings template:";
+	} else {
+		modeLabel = "external/comment review";
+		phaseFourInstruction =
+			"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
+		finishInstruction =
+			"6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.";
+		templateIntro = "Use this comment template for verified findings:";
+		if (noPost) {
+			actionInstruction =
+				"DRY RUN (--no-post): do not post any GitHub comments or reviews. Prepare comment-ready markdown for verified findings with best file/line context and present it in the final report only.";
+			toolInstruction =
+				"- Dry run (--no-post): prepare comment-ready markdown only; do not run any posting commands.";
+		} else if (hasPrTarget) {
+			actionInstruction = `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Use the gh CLI via your shell/bash tool to post comments. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`;
+			toolInstruction = `- Use \`gh pr comment ${run.target?.prNumber} --body <body>\` to post a general PR comment.`;
+			inlinePostInstruction = `- Use \`gh api repos/{owner}/{repo}/pulls/${run.target?.prNumber}/comments --method POST -f body=<body> -f commit_id=<sha> -f path=<file> -F position:=<line>\` for inline file/line comments, or fall back to \`gh pr comment\` for general comments.`;
+		} else {
+			actionInstruction =
+				"No PR target was resolved, so do not post comments. Instead prepare comment-ready markdown with best file/line context and explain that posting requires /vette <pr>.";
+			toolInstruction = "- No PR target; prepare comment-ready markdown only.";
+		}
+	}
+
 	const lines = [
 		`Vette beta completed ${run.results.length} lightweight topic agents using model pool '${run.poolName}'.`,
 		run.target
@@ -2157,7 +2210,7 @@ export function formatVetteBetaSynthesisPrompt(
 		`Timing: started ${run.startedAt}; finished ${run.finishedAt}; ${formatDuration(run.durationMs)}.`,
 		`Usage: ${formatTokens(totalInputTokens, totalOutputTokens)} across all topic-agent attempts.`,
 		`Succeeded: ${ok}; failed: ${failed}.`,
-		`Mode: ${isRepairMode ? "owned/self repair" : "external/comment review"}.`,
+		`Mode: ${modeLabel}.`,
 		...(run.changedPaths && run.changedPaths.length > 0
 			? [
 					"",
@@ -2177,34 +2230,22 @@ export function formatVetteBetaSynthesisPrompt(
 		"",
 		"Continue the full vette workflow from these topic-agent results; do not stop at a summary.",
 		"",
-		"Available tools for verification and posting:",
-		"- Use your shell/bash tool to run commands: read files, run tests, and execute gh CLI commands.",
+		toolsHeading,
+		shellToolInstruction,
 		"- Use read/grep/find/ls tools to inspect source files and verify findings against actual code.",
-		isRepairMode
-			? "- Use your shell/bash tool to run focused test commands and apply fixes."
-			: noPost
-				? "- Dry run (--no-post): prepare comment-ready markdown only; do not run any posting commands."
-				: hasPrTarget
-					? `- Use \`gh pr comment ${run.target?.prNumber} --body <body>\` to post a general PR comment.`
-					: "- No PR target; prepare comment-ready markdown only.",
-		hasPrTarget && !isRepairMode && !noPost
-			? `- Use \`gh api repos/{owner}/{repo}/pulls/${run.target?.prNumber}/comments --method POST -f body=<body> -f commit_id=<sha> -f path=<file> -F position:=<line>\` for inline file/line comments, or fall back to \`gh pr comment\` for general comments.`
-			: "",
+		toolInstruction,
+		inlinePostInstruction,
 		"- If a tool is unavailable or a command fails, report the specific error rather than declaring the phase blocked.",
 		"",
 		"Required next phases:",
 		"1. Parse and deduplicate all topic findings into stable finding IDs, preserving topic/model provenance.",
 		"2. Reject duplicate, low-confidence, and out-of-scope items with short reasons.",
 		"3. Verify each remaining actionable finding against actual source files using read/grep tools and focused shell commands. Do not skip verification by claiming tools are unavailable.",
-		"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.",
+		phaseFourInstruction,
 		`5. ${actionInstruction}`,
-		isRepairMode
-			? "6. Finish with counts for candidates, duplicates, rejected, verified, fixed, still failing, and blocked items."
-			: "6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.",
+		finishInstruction,
 		"",
-		isRepairMode
-			? "Use this repair evidence template for verified findings you fix or leave unresolved:"
-			: "Use this comment template for verified findings:",
+		templateIntro,
 		"### Verified issue: <short behavior-first title>",
 		"**Location:** <path:line or path>",
 		"**Source topics:** <topic ids/models>",
