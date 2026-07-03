@@ -201,6 +201,27 @@ describe("createWatchController", () => {
 		expect(refresh).toHaveBeenCalledTimes(2);
 	});
 
+	it("disposes the automatic watch timer without using a stale session context", async () => {
+		vi.useFakeTimers();
+		const refresh = vi.fn().mockResolvedValue(prSnapshot());
+		const refreshController = {
+			refresh,
+			getSnapshot: () => prSnapshot(),
+		} as unknown as RefreshController;
+		const pi = fakePi();
+		const ctx = fakeContext();
+		const controller = createWatchController(pi, refreshController);
+
+		expect(await controller.start(ctx)).toBe(true);
+		refresh.mockClear();
+
+		controller.dispose();
+		await vi.advanceTimersByTimeAsync(15 * 60_000);
+
+		expect(refresh).not.toHaveBeenCalled();
+		expect(controller.status()).toBe("Watch is not running.");
+	});
+
 	it("runs a watch check now and restarts the wait for the next automatic check", async () => {
 		vi.useFakeTimers();
 		const refresh = vi.fn().mockResolvedValue(prSnapshot());

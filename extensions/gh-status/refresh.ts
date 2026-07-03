@@ -56,12 +56,32 @@ function errorPr(
 	};
 }
 
-function renderSnapshot(ctx: ExtensionContext, snapshot: GhSnapshot): void {
-	ctx.ui.setStatus("gh-status.service", renderServiceStatus(snapshot.service));
-	ctx.ui.setStatus(
-		"gh-status.pr",
-		snapshot.repo.kind === "repo" ? renderPrStatus(snapshot.pr) : "",
+function isStaleContextError(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		/ctx is stale|stale after session replacement|after await ctx\.reload/i.test(
+			error.message,
+		)
 	);
+}
+
+function ignoreOnlyStaleContext(error: unknown): void {
+	if (!isStaleContextError(error)) throw error;
+}
+
+function renderSnapshot(ctx: ExtensionContext, snapshot: GhSnapshot): void {
+	try {
+		ctx.ui.setStatus(
+			"gh-status.service",
+			renderServiceStatus(snapshot.service),
+		);
+		ctx.ui.setStatus(
+			"gh-status.pr",
+			snapshot.repo.kind === "repo" ? renderPrStatus(snapshot.pr) : "",
+		);
+	} catch (error) {
+		ignoreOnlyStaleContext(error);
+	}
 }
 
 export function createRefreshController(
@@ -142,10 +162,14 @@ export function createRefreshController(
 			rateLimitBackoffUntil = new Date(
 				now().getTime() + backoffMinutes * 60_000,
 			);
-			ctx.ui.notify(
-				`GitHub API rate limited. Backing off for ${backoffMinutes} minutes. Error: ${errorMessage.substring(0, 100)}`,
-				"warning",
-			);
+			try {
+				ctx.ui.notify(
+					`GitHub API rate limited. Backing off for ${backoffMinutes} minutes. Error: ${errorMessage.substring(0, 100)}`,
+					"warning",
+				);
+			} catch (error) {
+				ignoreOnlyStaleContext(error);
+			}
 			// Log for debugging
 			console.warn("[gh-status] Rate limit detected:", errorMessage);
 		}
@@ -256,10 +280,14 @@ export function createRefreshController(
 				renderSnapshot(ctx, next);
 				const notifications = deriveActionableNotifications(next, seen);
 				for (const notification of notifications) {
-					ctx.ui.notify(
-						`${notification.title}: ${notification.message}`,
-						notification.severity,
-					);
+					try {
+						ctx.ui.notify(
+							`${notification.title}: ${notification.message}`,
+							notification.severity,
+						);
+					} catch (error) {
+						ignoreOnlyStaleContext(error);
+					}
 				}
 				markSeen(
 					pi,
@@ -307,7 +335,9 @@ export function createRefreshController(
 			seen = restoreSeenMarks(ctx);
 		},
 		startTimer(ctx) {
-			if (timer) return;
+			if (timer) clearTimeout(timer);
+			timer = undefined;
+			timerFailures = 0;
 			scheduleNext(ctx, intervalMs);
 		},
 		stop() {

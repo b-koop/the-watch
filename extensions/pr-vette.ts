@@ -5,9 +5,12 @@ import type {
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	VETTE_BETA_TOPICS,
 	VetteBetaCooldown,
+	averageTopicDuration,
 	formatResolvedModelPool,
 	formatVetteBetaSynthesisPrompt,
+	loadTopicTimings,
 	loadVetteBetaConfig,
 	resolveModelPool,
 	runVetteBetaReview,
@@ -97,6 +100,13 @@ type ScopeVetteContext = {
 type VetteCommandContext =
 	| { kind: "pr"; prContext: PrContext }
 	| { kind: "scope"; scopeContext: ScopeVetteContext };
+
+type VetteBetaStatusContext = {
+	targetLabel: string;
+	reviewMode: VetteBetaReviewMode;
+	queued: boolean;
+	progress?: string;
+};
 
 type CommandStatus = {
 	command: "vette" | "pr";
@@ -858,7 +868,10 @@ async function dispatchVetteBetaPrompt(
 	pi: ExtensionAPI,
 	args: string,
 	ctx: ExtensionCommandContext,
-	cooldown: VetteBetaCooldown,
+	options: {
+		cooldown: VetteBetaCooldown;
+		onStatus?: (status: VetteBetaStatusContext) => void;
+	},
 ): Promise<void> {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	const firstToken = tokens[0]?.toLowerCase();
@@ -898,27 +911,251 @@ async function dispatchVetteBetaPrompt(
 	const modelSummary = firstLaunchModel
 		? `${formatModelConnection(firstLaunchModel.model)} from pool '${resolvedPool.poolName}'`
 		: `pool '${resolvedPool.poolName}' has no usable models`;
+	const targetLabel =
+		target?.label ??
+		(isSelfReview ? "current branch self-review" : "current worktree");
+	const queued = !ctx.isIdle();
+	options.onStatus?.({
+		targetLabel,
+		reviewMode,
+		queued,
+	});
 
 	ctx.ui.notify(
-		`/vette: building diff bundle for ${target?.label ?? (isSelfReview ? "current branch self-review" : "current worktree")}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}`,
+		`/vette: building diff bundle for ${targetLabel}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}`,
 		"info",
 	);
-	const result = await runVetteBetaReview({
-		ctx,
-		pi,
-		config,
-		cooldown,
+
+	type TopicState = {
+		label: string;
+		status: "pending" | "running" | "done" | "failed";
+		findings: number;
+		startedAt?: number;
+		durationMs?: number;
+		inputTokens?: number;
+		outputTokens?: number;
+		model?: string;
+		avgMs?: number;
+	};
+	let phase: "bundle" | "topics" | "done" = "bundle";
+	const phaseStartedAt = Date.now();
+	const topicStates = new Map<string, TopicState>();
+	const timings = await loadTopicTimings();
+	for (const topic of VETTE_BETA_TOPICS) {
+		const avgMs = averageTopicDuration(timings, topic.id);
+		topicStates.set(topic.id, {
+			label: topic.label,
+			status: "pending",
+			findings: 0,
+			...(avgMs > 0 ? { avgMs } : {}),
+		});
+	}
+
+	function fmtMs(ms: number): string {
+		return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+	}
+
+	function fmtTokens(input?: number, output?: number): string {
+		if (input === undefined && output === undefined) return "";
+		return `${input?.toLocaleString() ?? "?"}in/${output?.toLocaleString() ?? "?"}out`;
+	}
+
+	function renderProgressWidget(): string[] {
+		const now = Date.now();
+		const elapsed = fmtMs(now - phaseStartedAt);
+		const lines: string[] = [];
+
+		if (phase === "bundle") {
+			lines.push(`  ○ Building diff bundle... ${elapsed}`);
+			return lines;
+		}
+
+		let doneCount = 0;
+		let runningCount = 0;
+		let totalFindings = 0;
+		for (const state of topicStates.values()) {
+			if (state.status === "done" || state.status === "failed") doneCount++;
+			if (state.status === "running") runningCount++;
+			totalFindings += state.findings;
+		}
+		const bar = progressBar(doneCount, topicStates.size);
+		lines.push(
+			`  ${bar}  ${doneCount}/${topicStates.size} topics  ${totalFindings} finding${totalFindings === 1 ? "" : "s"}  ${elapsed}`,
+		);
+		if (runningCount > 0) {
+			lines.push(`  ${runningCount} running`);
+		}
+		lines.push("");
+		for (const state of topicStates.values()) {
+			let icon: string;
+			let detail = "";
+			switch (state.status) {
+				case "done":
+					icon = "\u2713";
+					break;
+				case "failed":
+					icon = "\u2717";
+					break;
+				case "running":
+					icon = "\u25B8";
+					break;
+				default:
+					icon = "\u2219";
+					break;
+			}
+			if (state.status === "done" || state.status === "failed") {
+				const parts: string[] = [];
+				if (state.findings > 0) parts.push(`${state.findings} found`);
+				if (state.durationMs !== undefined) parts.push(fmtMs(state.durationMs));
+				const tok = fmtTokens(state.inputTokens, state.outputTokens);
+				if (tok) parts.push(tok);
+				if (parts.length > 0) detail = ` (${parts.join(", ")})`;
+			} else if (state.status === "running" && state.startedAt) {
+				detail = ` ${fmtMs(now - state.startedAt)}`;
+			} else if (state.avgMs) {
+				detail = ` ~${fmtMs(state.avgMs)}`;
+			}
+			lines.push(`  ${icon} ${state.label}${detail}`);
+		}
+		return lines;
+	}
+
+	function refreshWidget(): void {
+		ctx.ui.setWidget("vette-progress", renderProgressWidget(), {
+			placement: "aboveEditor",
+		});
+	}
+
+	refreshWidget();
+	const widgetTimer = setInterval(refreshWidget, 2_000);
+
+	let result: Awaited<ReturnType<typeof runVetteBetaReview>>;
+	try {
+		result = await runVetteBetaReview({
+			ctx,
+			pi,
+			config,
+			cooldown: options.cooldown,
+			reviewMode,
+			...(target ? { target } : {}),
+			onBundleReady: () => {
+				phase = "topics";
+				refreshWidget();
+			},
+			onTopicStart: (info) => {
+				const existing = topicStates.get(info.topic.id);
+				if (existing && existing.status === "pending") {
+					existing.status = "running";
+					existing.startedAt = Date.now();
+				}
+				refreshWidget();
+			},
+			onTopicComplete: (info) => {
+				topicStates.set(info.topic.id, {
+					label: info.topic.label,
+					status: info.ok ? "done" : "failed",
+					findings: info.findingsCount,
+					durationMs: info.durationMs,
+					inputTokens: info.inputTokens,
+					outputTokens: info.outputTokens,
+					model: info.model,
+				});
+				refreshWidget();
+				options.onStatus?.({
+					targetLabel,
+					reviewMode,
+					queued: false,
+					progress: `${info.completed}/${info.total}`,
+				});
+			},
+		});
+	} finally {
+		clearInterval(widgetTimer);
+	}
+
+	phase = "done";
+	options.onStatus?.({
+		targetLabel,
 		reviewMode,
-		...(target ? { target } : {}),
+		queued: false,
+		progress: `${result.results.length}/${VETTE_BETA_TOPICS.length}`,
 	});
-	pi.sendMessage(
-		{
-			customType: "the-watch-vette-beta-result",
-			content: formatVetteBetaSynthesisPrompt(result),
-			display: true,
-		},
-		{ triggerTurn: true },
+	ctx.ui.setWidget("vette-progress", undefined);
+
+	const allFailed = result.results.every((r) => !r.ok);
+	if (allFailed) {
+		const attemptSummary = result.results
+			.slice(0, 3)
+			.map((r) => {
+				const lastAttempt = r.attempts[r.attempts.length - 1];
+				return `${r.topic.label}: ${r.errorMessage ?? lastAttempt?.errorMessage ?? "unknown"}`;
+			})
+			.join("; ");
+		ctx.ui.notify(
+			`/vette failed: no working model found. ${attemptSummary}`,
+			"error",
+		);
+		return;
+	}
+
+	const synthesisPrompt = formatVetteBetaSynthesisPrompt(result);
+
+	let totalIn = 0;
+	let totalOut = 0;
+	let totalFindings = 0;
+	const rows: Array<{
+		icon: string;
+		label: string;
+		findings: string;
+		duration: string;
+		tokens: string;
+		model: string;
+	}> = [];
+	for (const state of topicStates.values()) {
+		totalIn += state.inputTokens ?? 0;
+		totalOut += state.outputTokens ?? 0;
+		totalFindings += state.findings;
+		rows.push({
+			icon: state.status === "done" ? "\u2713" : "\u2717",
+			label: state.label,
+			findings: state.findings > 0 ? String(state.findings) : "-",
+			duration: state.durationMs !== undefined ? fmtMs(state.durationMs) : "-",
+			tokens: fmtTokens(state.inputTokens, state.outputTokens) || "-",
+			model: state.model ?? "-",
+		});
+	}
+	const colW = {
+		label: Math.max("Topic".length, ...rows.map((r) => r.label.length)),
+		findings: Math.max("Finds".length, ...rows.map((r) => r.findings.length)),
+		duration: Math.max("Time".length, ...rows.map((r) => r.duration.length)),
+		tokens: Math.max("Tokens".length, ...rows.map((r) => r.tokens.length)),
+		model: Math.max("Model".length, ...rows.map((r) => r.model.length)),
+	};
+	const pad = (s: string, w: number) => s.padEnd(w);
+	const rpad = (s: string, w: number) => s.padStart(w);
+	const summaryLines: string[] = [
+		`/vette complete in ${fmtMs(result.durationMs)}`,
+		"",
+		`    ${pad("Topic", colW.label)}  ${rpad("Finds", colW.findings)}  ${rpad("Time", colW.duration)}  ${pad("Tokens", colW.tokens)}  Model`,
+		`    ${"\u2500".repeat(colW.label)}  ${"\u2500".repeat(colW.findings)}  ${"\u2500".repeat(colW.duration)}  ${"\u2500".repeat(colW.tokens)}  ${"\u2500".repeat(colW.model)}`,
+	];
+	for (const row of rows) {
+		summaryLines.push(
+			`  ${row.icon} ${pad(row.label, colW.label)}  ${rpad(row.findings, colW.findings)}  ${rpad(row.duration, colW.duration)}  ${pad(row.tokens, colW.tokens)}  ${row.model}`,
+		);
+	}
+	summaryLines.push(
+		`    ${"\u2500".repeat(colW.label)}  ${"\u2500".repeat(colW.findings)}  ${"\u2500".repeat(colW.duration)}  ${"\u2500".repeat(colW.tokens)}  ${"\u2500".repeat(colW.model)}`,
 	);
+	summaryLines.push(
+		`    ${pad("Total", colW.label)}  ${rpad(String(totalFindings), colW.findings)}  ${rpad(fmtMs(result.durationMs), colW.duration)}  ${pad(fmtTokens(totalIn, totalOut), colW.tokens)}`,
+	);
+	ctx.ui.notify(summaryLines.join("\n"), "info");
+	if (queued) {
+		pi.sendUserMessage(synthesisPrompt, { deliverAs: "followUp" });
+	} else {
+		pi.sendUserMessage(synthesisPrompt);
+	}
 }
 
 async function dispatchPrPrompt(
@@ -1023,6 +1260,12 @@ function agentReportedMerged(event: unknown): boolean {
 	return /status:\s*merged\b/i.test(textFromMessage(lastAssistant));
 }
 
+function progressBar(completed: number, total: number, width = 20): string {
+	const filled = total > 0 ? Math.round((completed / total) * width) : 0;
+	const empty = width - filled;
+	return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
+}
+
 function formatCountdown(nextCheckAt: number, now = Date.now()): string {
 	const remainingMs = Math.max(0, nextCheckAt - now);
 	const minutes = Math.floor(remainingMs / 60_000);
@@ -1039,6 +1282,21 @@ function renderStatus(status: CommandStatus): string {
 		? ` next ${formatCountdown(status.nextCheckAt)}`
 		: "";
 	return `${base}${mode}${next}`;
+}
+
+export function buildVetteBetaCommandStatus(
+	statusContext: VetteBetaStatusContext,
+): CommandStatus {
+	return {
+		command: "vette",
+		target: statusContext.targetLabel,
+		mode:
+			statusContext.reviewMode === "repair"
+				? "owned/self repair"
+				: "external/comment review",
+		phase: statusContext.queued ? "queued" : "working",
+		progress: statusContext.progress ?? `0/${VETTE_BETA_TOPICS.length}`,
+	};
 }
 
 function buildVetteCommandStatus(
@@ -1134,6 +1392,14 @@ export default function (pi: ExtensionAPI) {
 		safePublishStatus(ctx);
 	}
 
+	function setVetteBetaCommandStatus(
+		ctx: ExtensionCommandContext,
+		statusContext: VetteBetaStatusContext,
+	): void {
+		currentStatus = buildVetteBetaCommandStatus(statusContext);
+		safePublishStatus(ctx);
+	}
+
 	function setPrCommandStatus(
 		ctx: ExtensionCommandContext,
 		prCommandContext: PrCommandContext,
@@ -1169,10 +1435,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		stopStatusTimer();
 		safePublishStatus(ctx);
-		if (!statusTimer) {
-			statusTimer = setInterval(() => safePublishStatus(ctx), 30_000);
-		}
+		statusTimer = setInterval(() => safePublishStatus(ctx), 30_000);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -1195,7 +1460,11 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			await dispatchVetteBetaPrompt(pi, args, ctx, vetteBetaCooldown);
+			await dispatchVetteBetaPrompt(pi, args, ctx, {
+				cooldown: vetteBetaCooldown,
+				onStatus: (statusContext) =>
+					setVetteBetaCommandStatus(ctx, statusContext),
+			});
 		},
 	});
 

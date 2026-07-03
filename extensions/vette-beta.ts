@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { existsSync, mkdirSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import type {
@@ -130,8 +130,16 @@ export type PiAgentRunner = (
 	input: PiAgentRunInput,
 ) => Promise<PiAgentRunResult>;
 
+type ModelLike = {
+	provider: string;
+	id: string;
+	contextWindow?: number;
+	maxTokens?: number;
+};
+
 type ModelRegistryLike = {
 	find?: (provider: string, id: string) => unknown;
+	getAvailable?: () => ModelLike[];
 };
 
 type ExecLike = ExtensionAPI["exec"];
@@ -142,6 +150,70 @@ const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
 const THE_WATCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "the-watch.json");
+const TIMINGS_PATH = join(homedir(), ".pi", "agent", "vette-beta-timings.json");
+const TIMINGS_HISTORY_LIMIT = 10;
+
+export type TopicTimingEntry = {
+	durationMs: number;
+	model: string;
+	at: string;
+};
+
+export type TopicTimings = Record<string, TopicTimingEntry[]>;
+
+export async function loadTopicTimings(
+	path = TIMINGS_PATH,
+): Promise<TopicTimings> {
+	if (!existsSync(path)) return {};
+	try {
+		const raw = await readFile(path, "utf8");
+		const parsed = JSON.parse(raw) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+			return {};
+		return parsed as TopicTimings;
+	} catch {
+		return {};
+	}
+}
+
+export async function saveTopicTimings(
+	timings: TopicTimings,
+	path = TIMINGS_PATH,
+): Promise<void> {
+	const dir = path.replace(/\/[^/]+$/, "");
+	mkdirSync(dir, { recursive: true });
+	await writeFile(path, JSON.stringify(timings, null, 2) + "\n");
+}
+
+export function recordTopicTiming(
+	timings: TopicTimings,
+	topicId: string,
+	entry: TopicTimingEntry,
+): TopicTimings {
+	const existing = timings[topicId] ?? [];
+	const updated = [entry, ...existing].slice(0, TIMINGS_HISTORY_LIMIT);
+	return { ...timings, [topicId]: updated };
+}
+
+export function averageTopicDuration(
+	timings: TopicTimings,
+	topicId: string,
+): number {
+	const entries = timings[topicId];
+	if (!entries || entries.length === 0) return 0;
+	const total = entries.reduce((sum, entry) => sum + entry.durationMs, 0);
+	return total / entries.length;
+}
+
+export function sortTopicsSlowestFirst(
+	topics: VetteBetaTopic[],
+	timings: TopicTimings,
+): VetteBetaTopic[] {
+	return [...topics].sort(
+		(a, b) =>
+			averageTopicDuration(timings, b.id) - averageTopicDuration(timings, a.id),
+	);
+}
 
 export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 	modelPools: {
@@ -170,7 +242,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 	},
 	vetteBeta: {
 		modelPool: "light",
-		maxParallel: 8,
+		maxParallel: 16,
 		tools: ["read", "grep", "find", "ls"],
 		topicThinking: {
 			correctness: "medium",
@@ -312,7 +384,7 @@ function mergeConfig(partial: PartialVetteBetaConfig): VetteBetaConfig {
 					: DEFAULT_VETTE_BETA_CONFIG.vetteBeta.modelPool,
 			maxParallel:
 				typeof vetteBeta.maxParallel === "number" && vetteBeta.maxParallel > 0
-					? Math.max(1, Math.min(16, Math.round(vetteBeta.maxParallel)))
+					? Math.max(1, Math.round(vetteBeta.maxParallel))
 					: DEFAULT_VETTE_BETA_CONFIG.vetteBeta.maxParallel,
 			tools:
 				Array.isArray(vetteBeta.tools) &&
@@ -713,6 +785,11 @@ function isCleanFindingsResult(parsed: unknown): boolean {
 	);
 }
 
+function countParsedFindings(parsed: unknown): number {
+	if (!isObject(parsed) || !Array.isArray(parsed.findings)) return 0;
+	return parsed.findings.length;
+}
+
 function buildTopicPrompt(input: {
 	topic: VetteBetaTopic;
 	bundle: string;
@@ -747,6 +824,33 @@ Diff/context bundle:
 ${input.bundle}`;
 }
 
+function discoverFallbackModels(
+	modelRegistry: ModelRegistryLike | undefined,
+	pool: ResolvedModelEntry[],
+): ResolvedModelEntry[] {
+	if (!modelRegistry?.getAvailable) return [];
+	const available = modelRegistry.getAvailable();
+	if (!available || available.length === 0) return [];
+
+	const poolSelectors = new Set(pool.map((entry) => entry.model));
+	const candidates = available.filter(
+		(model) => !poolSelectors.has(`${model.provider}/${model.id}`),
+	);
+
+	candidates.sort(
+		(left, right) =>
+			(left.contextWindow ?? 200_000) - (right.contextWindow ?? 200_000),
+	);
+
+	return candidates.map((model, index) => ({
+		model: `${model.provider}/${model.id}`,
+		thinking: "off",
+		timeoutMs: DEFAULT_TIMEOUT_MS,
+		index: pool.length + index,
+		availability: "available" as const,
+	}));
+}
+
 export async function runTopicWithFallback(input: {
 	topic: VetteBetaTopic;
 	bundle: string;
@@ -757,6 +861,7 @@ export async function runTopicWithFallback(input: {
 	runner: PiAgentRunner;
 	signal?: AbortSignal;
 	topicThinking?: Record<string, string>;
+	modelRegistry?: ModelRegistryLike;
 }): Promise<VetteBetaTopicResult> {
 	const attempts: VetteBetaAttempt[] = [];
 	const prompt = buildTopicPrompt({ topic: input.topic, bundle: input.bundle });
@@ -842,6 +947,84 @@ export async function runTopicWithFallback(input: {
 		attempts.push({
 			model: entry.model,
 			thinking: effectiveThinking,
+			timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+			status: "failed",
+			exitCode: result.exitCode,
+			...(result.timedOut ? { timedOut: true } : {}),
+			errorMessage: failure,
+			...(result.durationMs !== undefined
+				? { durationMs: result.durationMs }
+				: {}),
+			...(result.inputTokens !== undefined
+				? { inputTokens: result.inputTokens }
+				: {}),
+			...(result.outputTokens !== undefined
+				? { outputTokens: result.outputTokens }
+				: {}),
+		});
+		input.cooldown.markFailure(entry.model, failure);
+	}
+
+	const fallbackModels = discoverFallbackModels(
+		input.modelRegistry,
+		input.pool,
+	);
+	for (const entry of fallbackModels) {
+		const cooling = input.cooldown.isCooling(entry.model);
+		if (cooling) {
+			attempts.push({
+				model: entry.model,
+				thinking: "off",
+				timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+				status: "skipped",
+				skippedReason: `cooldown ${cooling}`,
+			});
+			continue;
+		}
+
+		const result = await input.runner({
+			cwd: input.cwd,
+			prompt,
+			model: entry.model,
+			thinking: "off",
+			tools: input.tools,
+			timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+			...(input.signal ? { signal: input.signal } : {}),
+		});
+		const failure = runFailure(result);
+		if (!failure) {
+			const output = result.finalText || result.stdout;
+			const parsed = tryParseJsonOutput(output);
+			attempts.push({
+				model: entry.model,
+				thinking: "off",
+				timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+				status: "success",
+				exitCode: result.exitCode,
+				...(result.durationMs !== undefined
+					? { durationMs: result.durationMs }
+					: {}),
+				...(result.inputTokens !== undefined
+					? { inputTokens: result.inputTokens }
+					: {}),
+				...(result.outputTokens !== undefined
+					? { outputTokens: result.outputTokens }
+					: {}),
+			});
+			return {
+				topic: input.topic,
+				attempts,
+				finalModel: entry.model,
+				ok: true,
+				output,
+				parsed,
+			};
+		}
+
+		lastError = failure;
+		attempts.push({
+			model: entry.model,
+			thinking: "off",
 			timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 			status: "failed",
 			exitCode: result.exitCode,
@@ -1297,38 +1480,94 @@ export async function runVetteBetaReview(input: {
 	target?: VetteBetaReviewTarget;
 	reviewMode?: VetteBetaReviewMode;
 	topics?: VetteBetaTopic[];
+	onBundleReady?: (info: { bundleDurationMs: number }) => void;
+	onTopicStart?: (info: {
+		topic: VetteBetaTopic;
+		index: number;
+		total: number;
+	}) => void;
+	onTopicComplete?: (info: {
+		completed: number;
+		total: number;
+		topic: VetteBetaTopic;
+		ok: boolean;
+		findingsCount: number;
+		durationMs: number;
+		inputTokens?: number;
+		outputTokens?: number;
+		model?: string;
+	}) => void;
 }): Promise<VetteBetaRunResult> {
 	const startedMs = Date.now();
 	const startedAt = new Date(startedMs).toISOString();
+	const cwd = input.ctx.cwd;
+	const signal = input.ctx.signal;
+	const modelRegistry = (
+		input.ctx as unknown as { modelRegistry?: ModelRegistryLike }
+	).modelRegistry;
 	const pool = resolveModelPool({
 		config: input.config,
-		modelRegistry: (
-			input.ctx as unknown as { modelRegistry?: ModelRegistryLike }
-		).modelRegistry,
+		modelRegistry,
 	}).entries;
+	const bundleStart = Date.now();
 	const bundle = await buildVetteBetaDiffBundle({
 		exec: input.pi.exec,
-		cwd: input.ctx.cwd,
+		cwd,
 		...(input.snapshot ? { snapshot: input.snapshot } : {}),
 		...(input.target ? { target: input.target } : {}),
 	});
+	input.onBundleReady?.({ bundleDurationMs: Date.now() - bundleStart });
 	const topics = input.topics ?? VETTE_BETA_TOPICS;
+	const timings = await loadTopicTimings();
+	const sortedTopics = sortTopicsSlowestFirst(topics, timings);
+	let completedCount = 0;
+	let updatedTimings = timings;
 	const results = await mapWithConcurrencyLimit(
-		topics,
+		sortedTopics,
 		input.config.vetteBeta.maxParallel,
-		(topic) =>
-			runTopicWithFallback({
+		async (topic, index) => {
+			input.onTopicStart?.({ topic, index, total: sortedTopics.length });
+			const topicStart = Date.now();
+			const result = await runTopicWithFallback({
 				topic,
 				bundle,
-				cwd: input.ctx.cwd,
+				cwd,
 				tools: input.config.vetteBeta.tools,
 				pool,
 				cooldown: input.cooldown,
 				runner: input.runner ?? spawnPiAgent,
-				...(input.ctx.signal ? { signal: input.ctx.signal } : {}),
+				...(signal ? { signal } : {}),
 				topicThinking: input.config.vetteBeta.topicThinking,
-			}),
+				modelRegistry,
+			});
+			completedCount += 1;
+			const topicDurationMs = Date.now() - topicStart;
+			const findingsCount = countParsedFindings(result.parsed);
+			const successAttempt = result.attempts.find(
+				(a) => a.status === "success",
+			);
+			if (result.ok && result.finalModel) {
+				updatedTimings = recordTopicTiming(updatedTimings, topic.id, {
+					durationMs: topicDurationMs,
+					model: result.finalModel,
+					at: new Date().toISOString(),
+				});
+			}
+			input.onTopicComplete?.({
+				completed: completedCount,
+				total: sortedTopics.length,
+				topic,
+				ok: result.ok,
+				findingsCount,
+				durationMs: topicDurationMs,
+				inputTokens: successAttempt?.inputTokens,
+				outputTokens: successAttempt?.outputTokens,
+				model: result.finalModel,
+			});
+			return result;
+		},
 	);
+	await saveTopicTimings(updatedTimings).catch(() => {});
 	const finishedMs = Date.now();
 	return {
 		poolName: input.config.vetteBeta.modelPool,
@@ -1395,7 +1634,7 @@ export function formatVetteBetaSynthesisPrompt(
 	const actionInstruction = isRepairMode
 		? "This is an owned/self review. Do not post or draft PR review comments as the primary output. Verify candidates, fix confirmed issues directly in the working tree with focused changes, add or update focused tests where practical, and report fixed items plus any unresolved blockers. Do not commit."
 		: hasPrTarget
-			? `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`
+			? `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Use the gh CLI via your shell/bash tool to post comments. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`
 			: "No PR target was resolved, so do not post comments. Instead prepare comment-ready markdown with best file/line context and explain that posting requires /vette <pr>.";
 	const lines = [
 		`Vette beta completed ${run.results.length} lightweight topic agents using model pool '${run.poolName}'.`,
@@ -1408,10 +1647,24 @@ export function formatVetteBetaSynthesisPrompt(
 		`Mode: ${isRepairMode ? "owned/self repair" : "external/comment review"}.`,
 		"",
 		"Continue the full vette workflow from these topic-agent results; do not stop at a summary.",
+		"",
+		"Available tools for verification and posting:",
+		"- Use your shell/bash tool to run commands: read files, run tests, and execute gh CLI commands.",
+		"- Use read/grep/find/ls tools to inspect source files and verify findings against actual code.",
+		isRepairMode
+			? "- Use your shell/bash tool to run focused test commands and apply fixes."
+			: hasPrTarget
+				? `- Use \`gh pr comment ${run.target?.prNumber} --body <body>\` to post a general PR comment.`
+				: "- No PR target; prepare comment-ready markdown only.",
+		hasPrTarget && !isRepairMode
+			? `- Use \`gh api repos/{owner}/{repo}/pulls/${run.target?.prNumber}/comments --method POST -f body=<body> -f commit_id=<sha> -f path=<file> -F position:=<line>\` for inline file/line comments, or fall back to \`gh pr comment\` for general comments.`
+			: "",
+		"- If a tool is unavailable or a command fails, report the specific error rather than declaring the phase blocked.",
+		"",
 		"Required next phases:",
 		"1. Parse and deduplicate all topic findings into stable finding IDs, preserving topic/model provenance.",
 		"2. Reject duplicate, low-confidence, and out-of-scope items with short reasons.",
-		"3. Verify each remaining actionable finding with static proof, a focused command, or a temporary failing repro test where practical.",
+		"3. Verify each remaining actionable finding against actual source files using read/grep tools and focused shell commands. Do not skip verification by claiming tools are unavailable.",
 		"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.",
 		`5. ${actionInstruction}`,
 		isRepairMode

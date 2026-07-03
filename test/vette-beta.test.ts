@@ -177,7 +177,7 @@ describe("vette beta config", () => {
 			"provider/first",
 			"provider/second",
 		]);
-		expect(config.vetteBeta.maxParallel).toBe(16);
+		expect(config.vetteBeta.maxParallel).toBe(99);
 		expect(config.vetteBeta.tools).toEqual(["read"]);
 	});
 

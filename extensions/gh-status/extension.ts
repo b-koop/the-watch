@@ -242,6 +242,7 @@ function shouldIncludePrComments(params: unknown): boolean {
 function registerGithubLifecycle(
 	pi: ExtensionAPI,
 	controller: RefreshControllerInstance,
+	watchController: WatchControllerInstance,
 ): void {
 	pi.on("session_start", async (_event, ctx) => {
 		ctx.ui.setFooter(githubFooter);
@@ -257,6 +258,7 @@ function registerGithubLifecycle(
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		watchController.dispose();
 		controller.stop();
 		ctx.ui.setFooter(undefined);
 	});
@@ -408,7 +410,7 @@ export default function ghStatusExtension(pi: ExtensionAPI): void {
 	});
 	const watchController = createWatchController(pi, controller);
 
-	registerGithubLifecycle(pi, controller);
+	registerGithubLifecycle(pi, controller, watchController);
 	registerGithubStatusCommands(pi, controller);
 	registerWatchCommand(pi, watchController);
 	registerGithubTools(pi, controller);

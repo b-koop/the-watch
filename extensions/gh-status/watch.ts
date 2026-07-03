@@ -281,8 +281,37 @@ function formatPrompt(snapshot: GhSnapshot, findings: WatchFinding[]): string {
 	return `${lines.join("\n")}\n`;
 }
 
+function isStaleContextError(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		/ctx is stale|stale after session replacement|after await ctx\.reload/i.test(
+			error.message,
+		)
+	);
+}
+
+function ignoreOnlyStaleContext(error: unknown): void {
+	if (!isStaleContextError(error)) throw error;
+}
+
+function notifyWatchUi(
+	ctx: WatchUiContext,
+	message: string,
+	severity: Parameters<WatchUiContext["ui"]["notify"]>[1],
+): void {
+	try {
+		ctx.ui.notify(message, severity);
+	} catch (error) {
+		ignoreOnlyStaleContext(error);
+	}
+}
+
 function updateStatus(ctx: WatchUiContext, text: string | undefined): void {
-	ctx.ui.setStatus(WATCH_STATUS_KEY, text);
+	try {
+		ctx.ui.setStatus(WATCH_STATUS_KEY, text);
+	} catch (error) {
+		ignoreOnlyStaleContext(error);
+	}
 }
 
 function emptyFindingsByKind(): Record<WatchFinding["kind"], number> {
@@ -428,7 +457,7 @@ function appendWatchCheck(pi: ExtensionAPI, input: BuildCheckLogInput): void {
 
 function queueWatchInvestigation(input: QueueWatchInvestigationInput): void {
 	const { pi, ctx, snapshot, findings, status } = input;
-	ctx.ui.notify(formatWatchNotification(findings, status), "warning");
+	notifyWatchUi(ctx, formatWatchNotification(findings, status), "warning");
 	pi.sendMessage(
 		{
 			customType: "the-watch-watch-trigger",
@@ -440,7 +469,8 @@ function queueWatchInvestigation(input: QueueWatchInvestigationInput): void {
 }
 
 function notifyRefreshFailure(ctx: WatchTickContext, error: unknown): void {
-	ctx.ui.notify(
+	notifyWatchUi(
+		ctx,
 		`Watch refresh failed: ${error instanceof Error ? error.message : String(error)}`,
 		"error",
 	);
@@ -524,7 +554,8 @@ function initializeWatchState(
 
 function notifyWatchStarted(ctx: WatchTickContext, state: WatchState): void {
 	updateStatus(ctx, WATCH_ACTIVE_STATUS);
-	ctx.ui.notify(
+	notifyWatchUi(
+		ctx,
 		`Watch started (every ${describeInterval(state.intervalMs)}); performing initial sweep of all PR items.`,
 		"info",
 	);
@@ -536,7 +567,8 @@ function notifyInitialSweep(
 	snapshot: GhSnapshot,
 ): void {
 	const currentFindings = collectFindings(snapshot, new Set<string>());
-	ctx.ui.notify(
+	notifyWatchUi(
+		ctx,
 		`Initial sweep complete: found ${currentFindings.length} item${currentFindings.length === 1 ? "" : "s"} to investigate. Now monitoring for changes every ${describeInterval(state.intervalMs)}.`,
 		"info",
 	);
@@ -549,7 +581,8 @@ async function startWatch(
 ): Promise<boolean> {
 	const { refreshController, state } = runtime;
 	if (state.running) {
-		ctx.ui.notify(
+		notifyWatchUi(
+			ctx,
 			"Watch is already on. Use /watch status or /watch stop.",
 			"warning",
 		);
@@ -558,7 +591,8 @@ async function startWatch(
 
 	const snapshot = refreshController.getSnapshot();
 	if (!snapshot || !isOpen(snapshot)) {
-		ctx.ui.notify(
+		notifyWatchUi(
+			ctx,
 			"Watch requires an open PR snapshot. Refresh GitHub status first.",
 			"error",
 		);
@@ -581,18 +615,23 @@ async function runWatchNow(
 ): Promise<boolean> {
 	const { state } = runtime;
 	if (!state.running) {
-		ctx.ui.notify("Watch is not on. Start it with /watch first.", "warning");
+		notifyWatchUi(
+			ctx,
+			"Watch is not on. Start it with /watch first.",
+			"warning",
+		);
 		return false;
 	}
 	if (state.inFlight) {
-		ctx.ui.notify("Watch is already checking now.", "warning");
+		notifyWatchUi(ctx, "Watch is already checking now.", "warning");
 		return false;
 	}
 
 	const checked = await runWatchTick(runtime, ctx, "manual");
 	if (state.running) scheduleWatch(runtime, ctx);
 	if (checked && state.running) {
-		ctx.ui.notify(
+		notifyWatchUi(
+			ctx,
 			`Watch checked now; next automatic check in ${describeInterval(state.intervalMs)}.`,
 			"info",
 		);
@@ -612,7 +651,7 @@ function stopWatch(
 	state.inFlight = false;
 	state.runId += 1;
 	updateStatus(ctx, undefined);
-	ctx.ui.notify(`Watch stopped: ${reason}`, "info");
+	notifyWatchUi(ctx, `Watch stopped: ${reason}`, "info");
 }
 
 function watchStatus(state: WatchState): string {
@@ -640,6 +679,13 @@ export function createWatchController(
 		runNow: (ctx: WatchTickContext) => runWatchNow(runtime, ctx),
 		stop: (ctx: WatchUiContext, reason?: string) =>
 			stopWatch(runtime, ctx, reason),
+		dispose: () => {
+			if (state.timer) clearInterval(state.timer);
+			state.timer = undefined;
+			state.running = false;
+			state.inFlight = false;
+			state.runId += 1;
+		},
 		status: () => watchStatus(state),
 		isRunning: () => state.running,
 		getLastSnapshot: () => state.lastSnapshot,

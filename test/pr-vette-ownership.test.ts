@@ -1,5 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { inferLocalOwnership } from "../extensions/pr-vette.ts";
+import {
+	buildVetteBetaCommandStatus,
+	inferLocalOwnership,
+} from "../extensions/pr-vette.ts";
+import { VETTE_BETA_TOPICS } from "../extensions/vette-beta.ts";
+
+describe("buildVetteBetaCommandStatus", () => {
+	it("shows self vette as visible repair work while topic agents run", () => {
+		expect(
+			buildVetteBetaCommandStatus({
+				targetLabel: "current branch self-review",
+				reviewMode: "repair",
+				queued: false,
+			}),
+		).toMatchObject({
+			command: "vette",
+			target: "current branch self-review",
+			mode: "owned/self repair",
+			phase: "working",
+			progress: `0/${VETTE_BETA_TOPICS.length}`,
+		});
+	});
+});
 
 describe("inferLocalOwnership", () => {
 	it("treats the local branch as owned when a local author has contributed a non-merge commit", () => {
