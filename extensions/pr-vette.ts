@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
 import { promisify } from "node:util";
 import type {
 	ExtensionAPI,
@@ -908,6 +909,15 @@ async function dispatchVetteBetaPrompt(
 	const firstLaunchModel =
 		resolvedPool.entries.find((entry) => entry.availability !== "missing") ??
 		resolvedPool.entries[0];
+	const usableEntries = resolvedPool.entries.filter(
+		(entry) => entry.availability !== "missing",
+	);
+	const localModelEntries = usableEntries.filter((entry) =>
+		/^(ollama|lmstudio|local)\//i.test(entry.model),
+	);
+	const isLocalVette =
+		localModelEntries.length > 0 &&
+		localModelEntries.length === usableEntries.length;
 	const modelSummary = firstLaunchModel
 		? `${formatModelConnection(firstLaunchModel.model)} from pool '${resolvedPool.poolName}'`
 		: `pool '${resolvedPool.poolName}' has no usable models`;
@@ -921,8 +931,13 @@ async function dispatchVetteBetaPrompt(
 		queued,
 	});
 
+	const localVetteNotice = isLocalVette
+		? " [LOCAL VETTE — using local model(s) only, timeout extended to 30min/topic]"
+		: localModelEntries.length > 0
+			? " [mixed pool — includes local model(s)]"
+			: "";
 	ctx.ui.notify(
-		`/vette: building diff bundle for ${targetLabel}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}`,
+		`/vette: building diff bundle for ${targetLabel}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}${localVetteNotice}`,
 		"info",
 	);
 
@@ -1357,11 +1372,44 @@ function buildPrCommandStatus(
 	};
 }
 
+function getExtensionMtimes(): Record<string, number> {
+	const mtimes: Record<string, number> = {};
+	try {
+		const self = new URL(import.meta.url).pathname;
+		const vetteModule = new URL("./vette-beta.ts", import.meta.url).pathname;
+		for (const file of [self, vetteModule]) {
+			try {
+				mtimes[file] = statSync(file).mtimeMs;
+			} catch {
+				// File may not be stat-able in bundled/virtual environments.
+			}
+		}
+	} catch {
+		// import.meta.url may not resolve to a filesystem path.
+	}
+	return mtimes;
+}
+
+function checkExtensionUpdated(baseline: Record<string, number>): {
+	updated: boolean;
+	files: string[];
+} {
+	const changed: string[] = [];
+	for (const [file, originalMtime] of Object.entries(baseline)) {
+		try {
+			const currentMtime = statSync(file).mtimeMs;
+			if (currentMtime > originalMtime) changed.push(file);
+		} catch {}
+	}
+	return { updated: changed.length > 0, files: changed };
+}
+
 // fallow-ignore-next-line unused-export -- Pi extension entrypoint loaded from package.json
 export default function (pi: ExtensionAPI) {
 	let currentStatus: CommandStatus | undefined;
 	let statusTimer: ReturnType<typeof setInterval> | undefined;
 	const vetteBetaCooldown = new VetteBetaCooldown();
+	const extensionLoadMtimes = getExtensionMtimes();
 
 	function stopStatusTimer(): void {
 		if (statusTimer) clearInterval(statusTimer);
@@ -1448,6 +1496,14 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Run lightweight beta diff agents by default. Use /vette old for the legacy PR/scope workflow.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const preCheck = checkExtensionUpdated(extensionLoadMtimes);
+			if (preCheck.updated) {
+				ctx.ui.notify(
+					`/vette: plugin files updated on disk since load — consider reloading extensions for latest changes. Continuing with loaded version.`,
+					"warning",
+				);
+			}
+
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
 			const subcommand = tokens[0]?.toLowerCase();
 			if (subcommand === "old") {
@@ -1465,6 +1521,14 @@ export default function (pi: ExtensionAPI) {
 				onStatus: (statusContext) =>
 					setVetteBetaCommandStatus(ctx, statusContext),
 			});
+
+			const postCheck = checkExtensionUpdated(extensionLoadMtimes);
+			if (postCheck.updated) {
+				ctx.ui.notify(
+					`/vette: plugin was updated during run — reload extensions to pick up changes for the next run.`,
+					"warning",
+				);
+			}
 		},
 	});
 

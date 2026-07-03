@@ -26,6 +26,7 @@ export type VetteBetaConfig = {
 	vetteBeta: {
 		modelPool: string;
 		maxParallel: number;
+		localMaxParallel: number;
 		tools: string[];
 		topicThinking: Record<string, string>;
 	};
@@ -36,6 +37,7 @@ type PartialVetteBetaConfig = {
 	vetteBeta?: {
 		modelPool?: string;
 		maxParallel?: number;
+		localMaxParallel?: number;
 		tools?: string[];
 		topicThinking?: Record<string, string>;
 	};
@@ -145,7 +147,7 @@ type ModelRegistryLike = {
 type ExecLike = ExtensionAPI["exec"];
 
 const DEFAULT_TIMEOUT_MS = 3 * 60_000;
-const LOCAL_MODEL_TIMEOUT_MS = 10 * 60_000;
+const LOCAL_MODEL_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
@@ -218,21 +220,62 @@ export function sortTopicsSlowestFirst(
 export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 	modelPools: {
 		light: [
+			// OpenAI direct
 			{
-				model: "cursor/gemini-3-flash",
+				model: "openai/gpt-4o-mini",
 				thinking: "off",
 				timeoutMs: DEFAULT_TIMEOUT_MS,
 			},
+			{
+				model: "openai/gpt-5-mini",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			// Cursor
 			{
 				model: "cursor/gpt-5-mini",
 				thinking: "off",
 				timeoutMs: DEFAULT_TIMEOUT_MS,
 			},
 			{
-				model: "cursor/default",
+				model: "cursor/gemini-3-flash",
 				thinking: "off",
 				timeoutMs: DEFAULT_TIMEOUT_MS,
 			},
+			// Google direct
+			{
+				model: "google/gemini-3-flash",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			{
+				model: "google/gemini-3.5-flash",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			// Anthropic
+			{
+				model: "anthropic/claude-haiku-4.5",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			// OpenRouter (multi-provider fallback)
+			{
+				model: "openrouter/openai/gpt-4o-mini",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			{
+				model: "openrouter/google/gemini-3-flash",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			{
+				model: "openrouter/anthropic/claude-haiku-4.5",
+				thinking: "off",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+			},
+			// Local (offline fallback)
 			{
 				model: "ollama/ornith:9b",
 				thinking: "off",
@@ -243,6 +286,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 	vetteBeta: {
 		modelPool: "light",
 		maxParallel: 16,
+		localMaxParallel: 2,
 		tools: ["read", "grep", "find", "ls"],
 		topicThinking: {
 			correctness: "medium",
@@ -386,6 +430,11 @@ function mergeConfig(partial: PartialVetteBetaConfig): VetteBetaConfig {
 				typeof vetteBeta.maxParallel === "number" && vetteBeta.maxParallel > 0
 					? Math.max(1, Math.round(vetteBeta.maxParallel))
 					: DEFAULT_VETTE_BETA_CONFIG.vetteBeta.maxParallel,
+			localMaxParallel:
+				typeof vetteBeta.localMaxParallel === "number" &&
+				vetteBeta.localMaxParallel > 0
+					? Math.max(1, Math.round(vetteBeta.localMaxParallel))
+					: DEFAULT_VETTE_BETA_CONFIG.vetteBeta.localMaxParallel,
 			tools:
 				Array.isArray(vetteBeta.tools) &&
 				vetteBeta.tools.every((tool) => typeof tool === "string") &&
@@ -552,7 +601,7 @@ export class VetteBetaCooldown {
 }
 
 function isProviderLevelFailure(message: string): boolean {
-	return /rate.?limit|overload|timeout|timed out|temporary|unavailable|503|502|504|429|econn|enotfound|socket|network|provider/i.test(
+	return /rate.?limit|overload|timeout|timed out|temporary|unavailable|model.?not.?found|not.?found|503|502|504|429|econn|enotfound|socket|network|provider/i.test(
 		message,
 	);
 }
@@ -752,6 +801,10 @@ function runFailure(result: PiAgentRunResult): string | undefined {
 	if (result.errorMessage) return result.errorMessage;
 	if (result.stopReason === "error" || result.stopReason === "aborted") {
 		return `agent stopped with ${result.stopReason}`;
+	}
+	if (result.stopReason === "length") {
+		const tokens = result.outputTokens ?? 0;
+		return `output truncated (stopReason: length, ${tokens} output token${tokens === 1 ? "" : "s"}) — model max_tokens too low for review output`;
 	}
 	if (result.exitCode !== 0) {
 		return result.stderr.trim() || `pi exited with code ${result.exitCode}`;
@@ -1509,6 +1562,38 @@ export async function runVetteBetaReview(input: {
 		config: input.config,
 		modelRegistry,
 	}).entries;
+	const usablePool = pool.filter((e) => e.availability !== "missing");
+	const cloudEntries = usablePool.filter(
+		(e) => !/^(ollama|lmstudio|local)\//i.test(e.model),
+	);
+	const localEntries = usablePool.filter((e) =>
+		/^(ollama|lmstudio|local)\//i.test(e.model),
+	);
+
+	if (cloudEntries.length > 0 && localEntries.length > 0) {
+		const probe = cloudEntries[0];
+		const runner = input.runner ?? spawnPiAgent;
+		const probeResult = await runner({
+			cwd,
+			prompt: 'Respond with exactly: {"ok":true}',
+			model: probe.model,
+			thinking: "off",
+			tools: [],
+			timeoutMs: 15_000,
+			...(signal ? { signal } : {}),
+		});
+		const probeFailure = runFailure(probeResult);
+		if (probeFailure) {
+			input.cooldown.markFailure(probe.model, probeFailure);
+		}
+	}
+
+	const poolIsLocal =
+		cloudEntries.length === 0 ||
+		cloudEntries.every((e) => Boolean(input.cooldown.isCooling(e.model)));
+	const effectiveParallel = poolIsLocal
+		? input.config.vetteBeta.localMaxParallel
+		: input.config.vetteBeta.maxParallel;
 	const bundleStart = Date.now();
 	const bundle = await buildVetteBetaDiffBundle({
 		exec: input.pi.exec,
@@ -1524,7 +1609,7 @@ export async function runVetteBetaReview(input: {
 	let updatedTimings = timings;
 	const results = await mapWithConcurrencyLimit(
 		sortedTopics,
-		input.config.vetteBeta.maxParallel,
+		effectiveParallel,
 		async (topic, index) => {
 			input.onTopicStart?.({ topic, index, total: sortedTopics.length });
 			const topicStart = Date.now();

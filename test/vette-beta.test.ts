@@ -141,11 +141,12 @@ describe("vette beta config", () => {
 			"ls",
 		]);
 		const defaultConfig = parseVetteBetaConfig("{}");
-		expect(defaultConfig.modelPools.light[0].model).toBe(
-			"cursor/gemini-3-flash",
-		);
+		expect(defaultConfig.modelPools.light[0].model).toBe("openai/gpt-4o-mini");
 		expect(defaultConfig.modelPools.light[0].timeoutMs).toBe(180_000);
-		expect(defaultConfig.modelPools.light[3].timeoutMs).toBe(600_000);
+		const localEntry = defaultConfig.modelPools.light.find(
+			(e) => e.model === "ollama/ornith:9b",
+		);
+		expect(localEntry?.timeoutMs).toBe(1_800_000);
 		expect(defaultConfig.vetteBeta.topicThinking).toMatchObject({
 			correctness: "medium",
 			tests: "low",
@@ -181,7 +182,7 @@ describe("vette beta config", () => {
 		expect(config.vetteBeta.tools).toEqual(["read"]);
 	});
 
-	it("defaults remote models to three minutes and local models to ten minutes", () => {
+	it("defaults remote models to three minutes and local models to thirty minutes", () => {
 		const config = parseVetteBetaConfig(
 			JSON.stringify({
 				modelPools: {
@@ -191,7 +192,7 @@ describe("vette beta config", () => {
 		);
 
 		expect(config.modelPools.light.map((entry) => entry.timeoutMs)).toEqual([
-			180_000, 600_000,
+			180_000, 1_800_000,
 		]);
 	});
 
