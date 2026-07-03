@@ -884,6 +884,18 @@ describe("vette beta review integration", () => {
 		expect(prompt).toContain("Continue the full vette workflow");
 		expect(prompt).toContain("deduplicate all topic findings");
 		expect(prompt).toContain("Verify each remaining actionable finding");
+		expect(prompt).toContain("PR comment style contract");
+		expect(prompt).toContain(
+			"<summary>Verified issue: <one sentence stating what breaks and why></summary>",
+		);
+		expect(prompt).toContain("do not overload the summary");
+		expect(prompt).toContain(
+			"always leave one blank line after the closing </summary> tag",
+		);
+		expect(prompt).toContain(
+			"Put long logs and repro/test code inside fenced code blocks",
+		);
+		expect(prompt).toContain("each finding in its own nested <details> block");
 		expect(prompt).toContain("<<<UNTRUSTED_CONTENT_START>>>");
 		expect(prompt).toContain("<<<UNTRUSTED_CONTENT_END>>>");
 		expect(prompt).toContain(

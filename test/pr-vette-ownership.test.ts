@@ -3,6 +3,7 @@ import {
 	buildVetteBetaCommandStatus,
 	draftPrPrompt,
 	inferLocalOwnership,
+	reviewCommentTemplateContract,
 } from "../extensions/pr-vette.ts";
 import { VETTE_BETA_TOPICS } from "../extensions/vette-beta.ts";
 
@@ -37,6 +38,46 @@ describe("buildVetteBetaCommandStatus", () => {
 			phase: "working",
 			progress: `0/${VETTE_BETA_TOPICS.length}`,
 		});
+	});
+});
+
+describe("reviewCommentTemplateContract", () => {
+	it("keeps verified issue evidence collapsed behind concise summaries", () => {
+		const contract = reviewCommentTemplateContract();
+
+		expect(contract).toContain("<details>");
+		expect(contract).toContain(
+			"<summary>Verified issue: <one sentence stating what breaks and why></summary>",
+		);
+		expect(contract).toContain(
+			"Summary text must be one sentence, behavior-first",
+		);
+		expect(contract).toContain(
+			"always leave one blank line after the closing `</summary>` tag",
+		);
+		expect(contract).toContain("**Evidence:**");
+		expect(contract).toContain("</details>");
+	});
+
+	it("groups verified-but-untestable findings into one details panel per finding", () => {
+		const contract = reviewCommentTemplateContract();
+
+		expect(contract).toContain(
+			"Verified findings without focused repro tests: <one short sentence summarizing the shared risk without overstating severity>.",
+		);
+		expect(contract).toContain(
+			"<summary><one sentence stating what breaks and why for this finding></summary>",
+		);
+		expect(contract).toContain(
+			"Repeat one `<details>` block per verified-but-untestable finding.",
+		);
+	});
+
+	it("preserves minimal naming suggestion comments outside the details template", () => {
+		const contract = reviewCommentTemplateContract();
+
+		expect(contract).toContain("do not use the verified issue template");
+		expect(contract).toContain("```suggest");
 	});
 });
 

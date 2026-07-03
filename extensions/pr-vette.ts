@@ -679,19 +679,24 @@ function reviewCommentTestContract(): string {
 function reviewCommentPostingContract(): string {
 	return `Review comment posting contract:
 - Do not post comments while still gathering, testing, or cleaning up evidence. After all verification and cleanup is complete, post the verified items in one posting pass.
+- Every substantive verified issue comment must put the developer-facing finding in the \`<summary>\`: one plain sentence that says what breaks and why. Do not overload the summary with verification metadata, lane names, counts, model names, or command output.
 - For each test-reproduced verified finding, post the associated review comment at the most precise location available: prefer file + exact diff line; if no reliable line exists, use the file-level location when GitHub supports it; if the file is not a good/valid review-comment target, post it as a general PR comment with the file/line context in the body.
 - For [name-check] test-name or identifier/variable naming suggestions and questions: post each substantive naming suggestion as a review comment anchored to the exact changed line in the diff. Use the minimal naming-suggestion comment style from the template contract: a GitHub \`\`\`suggest block with the full replacement line first, then brief reasoning. Do not attach or reference screenshots, clipboard paths, or local image paths for naming suggestions. These are not bundled into the singular untestable-items comment; they are per-line inline comments even when no repro test applies.
-- Build one singular final PR comment for all verified-but-untestable findings. Include each item with lane provenance, severity/disposition, user impact, evidence, why a focused failing test was not practical, and file/line information whenever possible.
+- Build one singular final PR comment for all verified-but-untestable findings. Start it with a short non-scary sentence that states what kind of risk was found, then put each finding in its own \`<details>\` block with a one-sentence \`<summary>\` that names the broken behavior and why it matters.
 - Post the singular untestable-items comment at the end of the posting pass, after all line/file-specific verified comments have been posted.
 - If GitHub rejects a line/file comment location, fall back to the next less-specific location and record that fallback in the final report.`;
 }
 
-function reviewCommentTemplateContract(): string {
+export function reviewCommentTemplateContract(): string {
 	return `Review comment templates:
 - Use the templates below for posted comments. Keep headings and labels stable so the PR thread is scannable.
+- Summary text must be one sentence, behavior-first, and plainly explain what was found and why it is a bug. Keep verification details inside the expanded panel.
+- GitHub rendering rule: always leave one blank line after the closing \`</summary>\` tag before hidden Markdown content starts, especially before lists, headings, or fenced code blocks.
+- Put long logs and repro/test code inside fenced code blocks within the expanded details body.
 - For line/file-level test-reproduced findings, post one comment per finding with this body:
 
-### Verified issue: <short behavior-first title>
+<details>
+  <summary>Verified issue: <one sentence stating what breaks and why></summary>
 
 **Location:** <path:line or path>
 **Source lanes:** <[vette] [name-check] [thermo-nuclear]>
@@ -708,6 +713,7 @@ function reviewCommentTemplateContract(): string {
 ~~~~
 
 **Fix boundary:** <smallest safe change expected>
+</details>
 
 - For [name-check] test-name-only or identifier/variable naming comments, do not use the verified issue template above. Use this minimal body exactly:
 
@@ -717,21 +723,25 @@ function reviewCommentTemplateContract(): string {
 
 <brief reasoning for why the replacement better names the behavior>
 
-- For general PR-comment fallbacks of test-reproduced findings, use the same template and keep **Location** as the first field with the best available file/line context.
+- For general PR-comment fallbacks of test-reproduced findings, use the same \`<details>\` template and keep **Location** as the first expanded field with the best available file/line context.
 - For the singular final verified-but-untestable PR comment, use this body:
 
-### Verified findings without focused repro tests
+Verified findings without focused repro tests: <one short sentence summarizing the shared risk without overstating severity>.
 
-These items were verified but were not practical to demonstrate with focused unit/regression tests. They are grouped here to avoid scattering non-line-specific comments.
+These items were verified but were not practical to demonstrate with focused unit/regression tests. They are grouped here to keep the PR thread focused.
 
-1. **<short behavior-first title>**
-   - **Location:** <path:line, path, or PR-wide>
-   - **Source lanes:** <[vette] [name-check] [thermo-nuclear]>
-   - **Impact:** <what user/system behavior breaks and who is affected>
-   - **Evidence:** <how it was verified>
-   - **Why no focused test:** <reason>
-   - **Fix boundary:** <smallest safe change expected>
+<details>
+  <summary><one sentence stating what breaks and why for this finding></summary>
 
+- **Location:** <path:line, path, or PR-wide>
+- **Source lanes:** <[vette] [name-check] [thermo-nuclear]>
+- **Impact:** <what user/system behavior breaks and who is affected>
+- **Evidence:** <how it was verified>
+- **Why no focused test:** <reason>
+- **Fix boundary:** <smallest safe change expected>
+</details>
+
+- Repeat one \`<details>\` block per verified-but-untestable finding.
 - If there are no verified-but-untestable findings, do not post the singular untestable-items comment; record "none" in the final report.`;
 }
 
@@ -764,9 +774,9 @@ function vettePrompt(
 	}
 
 	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- Local non-merge commit evidence does not show this PR branch is owned here, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason.
-- Prepare GitHub review comments that follow the repo comment contract: exact file/line when available, user impact, local evidence, fix boundary, and suggested tests when appropriate. For test-reproducible findings, include the exact failing test code in the associated comment body.
+- Prepare GitHub review comments that follow the repo comment contract: exact file/line when available, user impact, local evidence, fix boundary, and suggested tests when appropriate. For every substantive finding, put a one-sentence bug reason in the \`<summary>\` and keep evidence/verification inside the expanded \`<details>\` body. For test-reproducible findings, include the exact failing test code in the associated comment body.
 - After all verification and cleanup is complete, post verified comments in one posting pass. Prefer file/line comments, fall back to file-level comments when line placement is not possible, and fall back to a general PR comment when the file is not a good comment target.
-- Build and post one singular final PR comment for verified-but-untestable findings, including file/line information for every item where possible.
+- Build and post one singular final PR comment for verified-but-untestable findings, including file/line information for every item where possible; each finding must be its own \`<details>\` block with a concise summary.
 - Post only findings that passed the verification gate; reject or report unverified suggestions without posting them.\n- ${commentPolicy}\n- Do not implement repairs on someone else's PR unless the user explicitly asks after seeing the review.\n\nUse these existing skills/instructions by prompt routing as relevant: pr-review, vette, naming, test-name, and thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentTestContract()}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\nFinish with review disposition, commands/results, findings artifact path, comments prepared and posted, rejected findings, untestable-items comment URL/status, and cleanup status.`;
 }
 
