@@ -114,11 +114,12 @@ export function createRefreshController(
 		currentBranch?: string,
 		currentSha?: string,
 	): boolean {
-		// Always refresh on explicit commands
-		if (reason === "command" || reason === "tool") return false;
-
-		// Skip if we're in rate limit backoff
+		// Rate-limit backoff applies to every path, including explicit commands:
+		// hammering the API during a 403 backoff only extends the penalty.
 		if (isRateLimited()) return true;
+
+		// Otherwise always refresh on explicit commands
+		if (reason === "command" || reason === "tool") return false;
 
 		// Skip if last refresh was very recent
 		if (
@@ -148,8 +149,15 @@ export function createRefreshController(
 		return false;
 	}
 
-	function handleRateLimit(ctx: ExtensionContext, error: any): void {
-		const errorMessage = error?.message || error?.stderr || String(error);
+	function handleRateLimit(ctx: ExtensionContext, error: unknown): void {
+		const errorRecord =
+			typeof error === "object" && error !== null
+				? (error as { message?: unknown; stderr?: unknown })
+				: undefined;
+		const errorMessage =
+			(typeof errorRecord?.message === "string" && errorRecord.message) ||
+			(typeof errorRecord?.stderr === "string" && errorRecord.stderr) ||
+			String(error);
 		// Check for various rate limit patterns
 		const isRateLimit =
 			/rate limit|API rate limit|already exceeded|GraphQL.*rate.*limit|403.*limit/i.test(
