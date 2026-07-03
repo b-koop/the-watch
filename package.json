@@ -1,13 +1,39 @@
 {
   "name": "the-watch",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Pi package that guards pull requests with PR-aware /vette, /pr, and /watch commands plus GitHub status diagnostics.",
   "type": "module",
+  "license": "MIT",
+  "author": "b-koop",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/b-koop/the-watch.git"
+  },
+  "homepage": "https://github.com/b-koop/the-watch#readme",
+  "bugs": {
+    "url": "https://github.com/b-koop/the-watch/issues"
+  },
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "pr-review",
+    "code-review",
+    "github",
+    "vette",
+    "watch"
   ],
-  "license": "UNLICENSED",
-  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "extensions/",
+    "README.md"
+  ],
   "pi": {
     "extensions": [
       "./extensions/pr-vette.ts",
@@ -15,21 +41,27 @@
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@types/node": "^25.9.2",
-    "typescript": "^5.9.3",
     "@earendil-works/pi-tui": "^0.75.4",
+    "@types/node": "^25.9.2",
     "typebox": "latest",
+    "typescript": "^5.9.3",
     "vitest": "latest"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "pnpm typecheck && vitest run",
-    "vitest": "vitest run"
+    "vitest": "vitest run",
+    "prepublishOnly": "pnpm typecheck",
+    "pack:check": "npm pack --dry-run"
   }
 }
