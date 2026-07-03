@@ -23,6 +23,16 @@ const MODELS_URL = "https://aistupidlevel.info/api/models";
 
 // ── Types ──
 
+export type ModelAxes = {
+	correctness: number;
+	spec: number;
+	codeQuality: number;
+	efficiency: number;
+	stability: number;
+	refusal: number;
+	recovery: number;
+};
+
 export type ModelRanking = {
 	id: string;
 	name: string;
@@ -31,11 +41,17 @@ export type ModelRanking = {
 	confidenceLower: number;
 	confidenceUpper: number;
 	trend: string;
-	costInput: number | null; // $ per 1M input tokens
-	costOutput: number | null; // $ per 1M output tokens
+	costInput: number | null;
+	costOutput: number | null;
 	costNote: string;
+	axes: ModelAxes;
+	supportsToolCalling: boolean;
+	toolCallReliability: number;
+	maxToolsPerCall: number;
 	usesReasoningEffort: boolean;
 };
+
+export type AxisName = keyof ModelAxes;
 
 export type RankingsTable = {
 	fetchedAt: string;
@@ -112,7 +128,13 @@ type ModelDetail = {
 	name: string;
 	vendor: string;
 	notes: string;
+	supportsToolCalling: boolean;
+	maxToolsPerCall: number;
+	toolCallReliability: number;
 	usesReasoningEffort: boolean;
+	latestScore?: {
+		axes?: Record<string, number>;
+	};
 };
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -126,6 +148,40 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 // ── Core: fetch, merge, rank ──
 
+const DETAIL_URL = (id: string) =>
+	`https://aistupidlevel.info/api/models/${id}`;
+
+const DEFAULT_AXES: ModelAxes = {
+	correctness: 0,
+	spec: 0,
+	codeQuality: 0,
+	efficiency: 0,
+	stability: 0,
+	refusal: 0,
+	recovery: 0,
+};
+
+function parseAxes(raw?: Record<string, number>): ModelAxes {
+	if (!raw) return { ...DEFAULT_AXES };
+	return {
+		correctness: raw.correctness ?? 0,
+		spec: raw.spec ?? 0,
+		codeQuality: raw.codeQuality ?? 0,
+		efficiency: raw.efficiency ?? 0,
+		stability: raw.stability ?? 0,
+		refusal: raw.refusal ?? 0,
+		recovery: raw.recovery ?? 0,
+	};
+}
+
+async function fetchModelDetail(id: string): Promise<ModelDetail | null> {
+	try {
+		return await fetchJson<ModelDetail>(DETAIL_URL(id));
+	} catch {
+		return null;
+	}
+}
+
 async function fetchRankings(): Promise<RankingsTable> {
 	const [scoresRes, modelsRes] = await Promise.all([
 		fetchJson<ScoresResponse>(SCORES_URL),
@@ -135,8 +191,25 @@ async function fetchRankings(): Promise<RankingsTable> {
 	const modelMap = new Map(modelsRes.map((m) => [String(m.id), m]));
 	const scores = scoresRes.data ?? scoresRes;
 
-	const models: ModelRanking[] = (scores as ScoresResponse["data"]).map((s) => {
-		const detail = modelMap.get(s.id);
+	// Fetch per-model details in parallel (for axes) — batch of 6 at a time
+	const scoreList = scores as ScoresResponse["data"];
+	const detailMap = new Map<string, ModelDetail>();
+	const batches: ScoresResponse["data"][number][][] = [];
+	for (let i = 0; i < scoreList.length; i += 6) {
+		batches.push(scoreList.slice(i, i + 6));
+	}
+	for (const batch of batches) {
+		const results = await Promise.all(batch.map((s) => fetchModelDetail(s.id)));
+		for (let i = 0; i < batch.length; i++) {
+			const detail = results[i];
+			if (detail) detailMap.set(batch[i].id, detail);
+		}
+	}
+
+	const models: ModelRanking[] = scoreList.map((s) => {
+		const listDetail = modelMap.get(s.id);
+		const fullDetail = detailMap.get(s.id);
+		const detail = fullDetail ?? listDetail;
 		const costs = parseCosts(detail?.notes ?? "");
 		return {
 			id: s.id,
@@ -149,6 +222,12 @@ async function fetchRankings(): Promise<RankingsTable> {
 			costInput: costs.input,
 			costOutput: costs.output,
 			costNote: costs.raw,
+			axes: parseAxes(fullDetail?.latestScore?.axes),
+			supportsToolCalling: detail?.supportsToolCalling ?? false,
+			toolCallReliability:
+				(detail as ModelDetail | undefined)?.toolCallReliability ?? 0,
+			maxToolsPerCall:
+				(detail as ModelDetail | undefined)?.maxToolsPerCall ?? 0,
 			usesReasoningEffort: s.usesReasoningEffort ?? false,
 		};
 	});
@@ -228,6 +307,24 @@ export async function forceRefreshRankings(): Promise<RankingsTable | null> {
 /**
  * Format the rankings table as a concise summary for display.
  */
+function formatTags(m: ModelRanking): string {
+	const tags: string[] = [];
+	if (m.supportsToolCalling) tags.push(`tools(${m.maxToolsPerCall})`);
+	if (m.usesReasoningEffort) tags.push("thinking");
+	if (m.toolCallReliability >= 0.9) tags.push("reliable-tools");
+	const best = bestAxes(m.axes, 2);
+	if (best.length > 0)
+		tags.push(...best.map(([k, v]) => `${k}:${(v * 100).toFixed(0)}`));
+	return tags.join(" ");
+}
+
+function bestAxes(axes: ModelAxes, n: number): Array<[string, number]> {
+	return Object.entries(axes)
+		.filter(([, v]) => v > 0)
+		.sort(([, a], [, b]) => b - a)
+		.slice(0, n);
+}
+
 export function formatRankings(table: RankingsTable): string {
 	const age = Date.now() - new Date(table.fetchedAt).getTime();
 	const ageH = (age / 3_600_000).toFixed(1);
@@ -247,7 +344,10 @@ export function formatRankings(table: RankingsTable): string {
 				? `$${m.costInput}/$${m.costOutput}`
 				: "n/a";
 		const trend = m.trend.padEnd(6);
-		lines.push(`${rank}  ${score}  ${cost.padEnd(18)}  ${trend}  ${m.name}`);
+		const tags = formatTags(m);
+		lines.push(
+			`${rank}  ${score}  ${cost.padEnd(18)}  ${trend}  ${m.name}${tags ? `  [${tags}]` : ""}`,
+		);
 	}
 	return lines.join("\n");
 }

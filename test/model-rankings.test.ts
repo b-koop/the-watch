@@ -4,9 +4,20 @@ import { describe, expect, it } from "vitest";
 // we test the public formatRankings + the sort order instead.
 import {
 	formatRankings,
+	type ModelAxes,
 	type ModelRanking,
 	type RankingsTable,
 } from "../extensions/model-rankings.ts";
+
+const ZERO_AXES: ModelAxes = {
+	correctness: 0,
+	spec: 0,
+	codeQuality: 0,
+	efficiency: 0,
+	stability: 0,
+	refusal: 0,
+	recovery: 0,
+};
 
 function makeModel(overrides: Partial<ModelRanking>): ModelRanking {
 	return {
@@ -20,6 +31,10 @@ function makeModel(overrides: Partial<ModelRanking>): ModelRanking {
 		costInput: 1,
 		costOutput: 5,
 		costNote: "$1/$5 per MTok",
+		axes: { ...ZERO_AXES },
+		supportsToolCalling: false,
+		toolCallReliability: 0,
+		maxToolsPerCall: 0,
 		usesReasoningEffort: false,
 		...overrides,
 	};
