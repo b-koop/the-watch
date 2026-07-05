@@ -165,7 +165,7 @@ export const DEFAULT_LOCAL_VETTE_MODELS = [
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
-const THE_WATCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "the-watch.json");
+const WATCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "watch.json");
 const TIMINGS_PATH = join(homedir(), ".pi", "agent", "vette-beta-timings.json");
 const TIMINGS_HISTORY_LIMIT = 10;
 
@@ -567,7 +567,7 @@ export function parseVetteBetaConfig(raw: string): VetteBetaConfig {
 }
 
 export async function loadVetteBetaConfig(
-	configPath = THE_WATCH_CONFIG_PATH,
+	configPath = WATCH_CONFIG_PATH,
 ): Promise<VetteBetaConfig> {
 	if (!existsSync(configPath)) return DEFAULT_VETTE_BETA_CONFIG;
 	return parseVetteBetaConfig(await readFile(configPath, "utf8"));
@@ -641,7 +641,7 @@ export function formatResolvedModelPool(input: {
 	const resolved = resolveModelPool(input);
 	const lines = [
 		`Vette beta model pool: ${resolved.poolName}`,
-		`Config path: ${THE_WATCH_CONFIG_PATH}`,
+		`Config path: ${WATCH_CONFIG_PATH}`,
 	];
 	if (resolved.error) lines.push(`Error: ${resolved.error}`);
 	if (resolved.entries.length === 0) return lines.join("\n");

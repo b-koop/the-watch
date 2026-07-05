@@ -1,17 +1,17 @@
 {
-  "name": "the-watch",
+  "name": "@ai-local/watch",
   "version": "1.0.0",
-  "description": "Pi package that guards pull requests with PR-aware /vette, /pr, and /watch commands plus GitHub status diagnostics.",
+  "description": "Pi package that watches pull requests with PR-aware /vette, /pr, and /watch commands plus GitHub status diagnostics.",
   "type": "module",
   "license": "MIT",
   "author": "b-koop",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/b-koop/the-watch.git"
+    "url": "git+https://github.com/ai-local/watch.git"
   },
-  "homepage": "https://github.com/b-koop/the-watch#readme",
+  "homepage": "https://github.com/ai-local/watch#readme",
   "bugs": {
-    "url": "https://github.com/b-koop/the-watch/issues"
+    "url": "https://github.com/ai-local/watch/issues"
   },
   "keywords": [
     "pi-package",

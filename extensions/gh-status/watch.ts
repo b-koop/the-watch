@@ -5,8 +5,8 @@ import type {
 import type { GhSnapshot, PullRequestActivity } from "./types.ts";
 import type { RefreshController } from "./refresh.ts";
 
-export const WATCH_STATUS_KEY = "the-watch.watch";
-export const WATCH_CHECK_CUSTOM_TYPE = "the-watch-watch-check";
+export const WATCH_STATUS_KEY = "watch.watch";
+export const WATCH_CHECK_CUSTOM_TYPE = "watch-check";
 const WATCH_INTERVAL_MS = 15 * 60_000;
 const WATCH_INTERVAL_LABEL = "15m";
 
@@ -470,7 +470,7 @@ function queueWatchInvestigation(input: QueueWatchInvestigationInput): void {
 	notifyWatchUi(ctx, formatWatchNotification(findings, status), "warning");
 	pi.sendMessage(
 		{
-			customType: "the-watch-watch-trigger",
+			customType: "watch-trigger",
 			content: formatPrompt(snapshot, [...findings], { forceLocal }),
 			display: true,
 		},

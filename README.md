@@ -1,12 +1,12 @@
-# The Watch
+# Watch
 
-Pi package that guards pull requests with PR-aware `/vette`, `/pr`, `/watch`,
+Pi package that watches pull requests with PR-aware `/vette`, `/pr`, `/watch`,
 and GitHub status commands.
 
 ## Install
 
 ```bash
-pi install npm:the-watch
+pi install npm:@ai-local/watch
 ```
 
 Or for local development:
@@ -103,7 +103,7 @@ Also exposes agent tools: `github_status_refresh`, `github_pr_diagnostics`,
 
 ## Configuration
 
-Optional config at `~/.pi/agent/the-watch.json`:
+Optional config at `~/.pi/agent/watch.json`:
 
 ```json
 {

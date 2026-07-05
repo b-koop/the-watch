@@ -70,7 +70,7 @@ const githubFooter: FooterFactory = (_tui, theme, footerData) => ({
 		const statuses = footerData.getExtensionStatuses();
 		const service = statuses.get("gh-status.service") ?? "";
 		const pr = statuses.get("gh-status.pr") ?? "";
-		const watch = statuses.get("the-watch.watch") ?? "";
+		const watch = statuses.get("watch.watch") ?? "";
 		const hasFooterStatus = Boolean(service || pr || watch);
 		if (!hasFooterStatus) return [];
 

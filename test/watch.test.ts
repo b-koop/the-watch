@@ -359,7 +359,7 @@ describe("createWatchController", () => {
 			"warning",
 		);
 		expect(pi.sendMessage).toHaveBeenCalledWith(
-			expect.objectContaining({ customType: "the-watch-watch-trigger" }),
+			expect.objectContaining({ customType: "watch-trigger" }),
 			{ triggerTurn: true },
 		);
 		expect(pi.appendEntry).toHaveBeenCalledWith(
@@ -541,7 +541,7 @@ describe("createWatchController", () => {
 			"warning",
 		);
 		expect(pi.sendMessage).toHaveBeenCalledWith(
-			expect.objectContaining({ customType: "the-watch-watch-trigger" }),
+			expect.objectContaining({ customType: "watch-trigger" }),
 			{ triggerTurn: true },
 		);
 	});
