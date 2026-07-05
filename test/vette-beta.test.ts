@@ -13,6 +13,7 @@ import {
 	buildVetteBetaDiffBundle,
 	changedPathsFromDiff,
 	formatResolvedModelPool,
+	forceLocalVetteBetaConfig,
 	formatVetteBetaSynthesisPrompt,
 	groundTopicFindings,
 	parseChildModelList,
@@ -205,6 +206,33 @@ describe("vette beta config", () => {
 		expect(config.modelPools.light.map((entry) => entry.timeoutMs)).toEqual([
 			180_000, 1_800_000,
 		]);
+	});
+
+	it("forces local reviews to use the verified 35B local model only", () => {
+		const config = forceLocalVetteBetaConfig(
+			parseVetteBetaConfig(
+				JSON.stringify({
+					modelPools: {
+						light: [
+							{ model: "provider/remote", thinking: "medium", timeoutMs: 1 },
+						],
+					},
+					vetteBeta: { modelPool: "light" },
+				}),
+			),
+		);
+
+		expect(config.vetteBeta.modelPool).toBe("local");
+		expect(config.modelPools.local).toEqual([
+			{
+				model: "ollama/ornith:35b",
+				thinking: "off",
+				timeoutMs: 1_800_000,
+			},
+		]);
+		expect(
+			resolveModelPool({ config }).entries.map((entry) => entry.model),
+		).toEqual(["ollama/ornith:35b"]);
 	});
 
 	it("allows topic thinking overrides while preserving defaults", () => {
@@ -1174,6 +1202,29 @@ describe("diff integrity and grounding", () => {
 		).findings.map((finding) => finding.title);
 		expect(keptTitles).toEqual(["Real", "Short path", "No file"]);
 		expect(grounded.result.output).not.toContain("gift-card");
+	});
+
+	it("adds local validation and scan-label requirements for local-only synthesis", () => {
+		const prompt = formatVetteBetaSynthesisPrompt(
+			{
+				poolName: "local",
+				resolvedPool: [],
+				bundle: "diff",
+				startedAt: "2026-07-02T10:00:00.000Z",
+				finishedAt: "2026-07-02T10:00:03.000Z",
+				durationMs: 3000,
+				reviewMode: "comment",
+				results: [{ topic, attempts: [], ok: true, output: "{}" }],
+			},
+			{ localOnly: true },
+		);
+
+		expect(prompt).toContain("Local-model validation requirement");
+		expect(prompt).toContain("especially every blocker");
+		expect(prompt).toContain("focused validating test or repro command");
+		expect(prompt).toContain("🔴 **Blocker**");
+		expect(prompt).toContain("🟡 **Recommended**");
+		expect(prompt).toContain("🔵 **Note**");
 	});
 
 	it("reports changed paths and dropped-ungrounded counts in the synthesis prompt", () => {

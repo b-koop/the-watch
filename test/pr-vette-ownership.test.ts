@@ -79,6 +79,17 @@ describe("reviewCommentTemplateContract", () => {
 		expect(contract).toContain("do not use the verified issue template");
 		expect(contract).toContain("```suggest");
 	});
+
+	it("requires scan labels at the top of every comment template", () => {
+		const contract = reviewCommentTemplateContract();
+
+		expect(contract).toContain("🔴 **Blocker**");
+		expect(contract).toContain("🟡 **Recommended**");
+		expect(contract).toContain("🔵 **Note**");
+		expect(contract.indexOf("🔴 **Blocker**")).toBeLessThan(
+			contract.indexOf("<details>"),
+		);
+	});
 });
 
 describe("draftPrPrompt", () => {

@@ -157,6 +157,7 @@ type ExecLike = ExtensionAPI["exec"];
 
 const DEFAULT_TIMEOUT_MS = 3 * 60_000;
 const LOCAL_MODEL_TIMEOUT_MS = 30 * 60_000;
+export const DEFAULT_LOCAL_VETTE_MODEL = "ollama/ornith:35b";
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
@@ -411,6 +412,26 @@ function normalizeModelEntry(entry: VetteBetaModelEntry): VetteBetaModelEntry {
 			(entry.timeoutMs ?? 0) > 0
 				? Math.round(entry.timeoutMs ?? defaultTimeoutMs)
 				: defaultTimeoutMs,
+	};
+}
+
+export function forceLocalVetteBetaConfig(
+	config: VetteBetaConfig,
+): VetteBetaConfig {
+	return {
+		modelPools: {
+			...config.modelPools,
+			local: [
+				normalizeModelEntry({
+					model: DEFAULT_LOCAL_VETTE_MODEL,
+					thinking: "off",
+				}),
+			],
+		},
+		vetteBeta: {
+			...config.vetteBeta,
+			modelPool: "local",
+		},
 	};
 }
 
@@ -2132,7 +2153,7 @@ function formatAttempt(attempt: VetteBetaAttempt): string {
 
 export function formatVetteBetaSynthesisPrompt(
 	run: VetteBetaRunResult,
-	options: { noPost?: boolean } = {},
+	options: { noPost?: boolean; localOnly?: boolean } = {},
 ): string {
 	const ok = run.results.filter((result) => result.ok).length;
 	const failed = run.results.length - ok;
@@ -2142,6 +2163,7 @@ export function formatVetteBetaSynthesisPrompt(
 	const isRepairMode = run.reviewMode === "repair";
 	const isDocMode = run.reviewMode === "doc";
 	const noPost = options.noPost === true;
+	const localOnly = options.localOnly === true;
 	let actionInstruction: string;
 	let modeLabel: string;
 	let toolsHeading = "Available tools for verification and posting:";
@@ -2160,7 +2182,7 @@ export function formatVetteBetaSynthesisPrompt(
 		toolInstruction =
 			"- Use your shell/bash tool to run focused test commands and apply fixes.";
 		phaseFourInstruction =
-			"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
+			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, fixed, still failing, and blocked items.";
 		templateIntro =
@@ -2182,7 +2204,7 @@ export function formatVetteBetaSynthesisPrompt(
 	} else {
 		modeLabel = "external/comment review";
 		phaseFourInstruction =
-			"4. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
+			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.";
 		templateIntro = "Use this comment template for verified findings:";
@@ -2241,11 +2263,17 @@ export function formatVetteBetaSynthesisPrompt(
 		"1. Parse and deduplicate all topic findings into stable finding IDs, preserving topic/model provenance.",
 		"2. Reject duplicate, low-confidence, and out-of-scope items with short reasons.",
 		"3. Verify each remaining actionable finding against actual source files using read/grep tools and focused shell commands. Do not skip verification by claiming tools are unavailable.",
+		...(localOnly
+			? [
+					"Local-model validation requirement: because this run used --local/local-only review, do not downgrade the verification bar. For every remaining finding, and especially every blocker, make a good-faith attempt to create a focused validating test or repro command that would fail before the fix. If no test is practical, explain why in the finding evidence.",
+				]
+			: []),
 		phaseFourInstruction,
 		`5. ${actionInstruction}`,
 		finishInstruction,
 		"",
 		"PR comment style contract:",
+		"- At the very top of every prepared or posted review comment, before any <details> block or suggestion fence, include exactly one scan label line: `🔴 **Blocker**`, `🟡 **Recommended**`, or `🔵 **Note**`. Map topic severities as blocker → Blocker, concern → Recommended, and suggestion → Note.",
 		"- Every substantive verified issue comment must use a <details> block with a one-sentence <summary> that plainly states what breaks and why it is a bug.",
 		"- Keep verification details, commands, counts, topic/model provenance, repro code, and fix boundaries inside the expanded details body; do not overload the summary.",
 		"- GitHub rendering rule: always leave one blank line after the closing </summary> tag before hidden Markdown content starts, especially before lists, headings, or fenced code blocks.",
@@ -2254,6 +2282,8 @@ export function formatVetteBetaSynthesisPrompt(
 		"- Preserve minimal GitHub ```suggest blocks for naming-only suggestions; do not wrap those in the verified issue template.",
 		"",
 		templateIntro,
+		"🔴 **Blocker** | 🟡 **Recommended** | 🔵 **Note**",
+		"",
 		"<details>",
 		"  <summary>Verified issue: <one sentence stating what breaks and why></summary>",
 		"",

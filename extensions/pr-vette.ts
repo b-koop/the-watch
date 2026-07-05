@@ -11,6 +11,7 @@ import {
 	VetteBetaDiffError,
 	averageTopicDuration,
 	formatResolvedModelPool,
+	forceLocalVetteBetaConfig,
 	formatVetteBetaSynthesisPrompt,
 	loadTopicTimings,
 	loadVetteBetaConfig,
@@ -670,6 +671,7 @@ function bugDraftContract(ctx: ScopeVetteContext): string {
 function reviewCommentTestContract(): string {
 	return `Review comment reproducibility contract:
 - At the end of external-review synthesis, inspect every actionable finding for whether it can be reproduced with a focused unit or regression test.
+- For every actionable finding, especially blockers, make a good-faith attempt to build the smallest temporary validating test or repro command that demonstrates the behavior.
 - For each reproducible finding, build the smallest temporary test that demonstrates the behavior, run the focused test command, and verify it fails for the expected reason on the PR branch.
 - Clean up temporary test files unless the user explicitly asked to commit tests; keep the exact test code and failing command output in the review evidence.
 - Put the relevant test code directly in the associated GitHub review comment body, along with the command that proved it failed as expected, before posting the verified comment.
@@ -679,6 +681,7 @@ function reviewCommentTestContract(): string {
 function reviewCommentPostingContract(): string {
 	return `Review comment posting contract:
 - Do not post comments while still gathering, testing, or cleaning up evidence. After all verification and cleanup is complete, post the verified items in one posting pass.
+- Every prepared or posted comment must start with exactly one scan label line before any details block or suggestion fence: \`🔴 **Blocker**\`, \`🟡 **Recommended**\`, or \`🔵 **Note**\`. Use Blocker for merge-blocking defects, Recommended for non-blocking fixes the author should strongly consider, and Note for contextual/low-risk observations.
 - Every substantive verified issue comment must put the developer-facing finding in the \`<summary>\`: one plain sentence that says what breaks and why. Do not overload the summary with verification metadata, lane names, counts, model names, or command output.
 - For each test-reproduced verified finding, post the associated review comment at the most precise location available: prefer file + exact diff line; if no reliable line exists, use the file-level location when GitHub supports it; if the file is not a good/valid review-comment target, post it as a general PR comment with the file/line context in the body.
 - For [name-check] test-name or identifier/variable naming suggestions and questions: post each substantive naming suggestion as a review comment anchored to the exact changed line in the diff. Use the minimal naming-suggestion comment style from the template contract: a GitHub \`\`\`suggest block with the full replacement line first, then brief reasoning. Do not attach or reference screenshots, clipboard paths, or local image paths for naming suggestions. These are not bundled into the singular untestable-items comment; they are per-line inline comments even when no repro test applies.
@@ -694,6 +697,8 @@ export function reviewCommentTemplateContract(): string {
 - GitHub rendering rule: always leave one blank line after the closing \`</summary>\` tag before hidden Markdown content starts, especially before lists, headings, or fenced code blocks.
 - Put long logs and repro/test code inside fenced code blocks within the expanded details body.
 - For line/file-level test-reproduced findings, post one comment per finding with this body:
+
+🔴 **Blocker** | 🟡 **Recommended** | 🔵 **Note**
 
 <details>
   <summary>Verified issue: <one sentence stating what breaks and why></summary>
@@ -717,6 +722,8 @@ export function reviewCommentTemplateContract(): string {
 
 - For [name-check] test-name-only or identifier/variable naming comments, do not use the verified issue template above. Use this minimal body exactly:
 
+🟡 **Recommended**
+
 \`\`\`suggest
 <full replacement changed line with the better test name, variable name, or identifier, preserving indentation and syntax>
 \`\`\`
@@ -725,6 +732,8 @@ export function reviewCommentTemplateContract(): string {
 
 - For general PR-comment fallbacks of test-reproduced findings, use the same \`<details>\` template and keep **Location** as the first expanded field with the best available file/line context.
 - For the singular final verified-but-untestable PR comment, use this body:
+
+🔴 **Blocker** | 🟡 **Recommended** | 🔵 **Note**
 
 Verified findings without focused repro tests: <one short sentence summarizing the shared risk without overstating severity>.
 
@@ -915,6 +924,8 @@ async function dispatchVetteBetaPrompt(
 	const allTokens = args.trim().split(/\s+/).filter(Boolean);
 	const noPost =
 		allTokens.includes("--no-post") || allTokens.includes("--dry-run");
+	const forceLocal =
+		allTokens.includes("--local") || allTokens.includes("--force-local");
 	const tokens = allTokens.filter((token) => !token.startsWith("--"));
 	const firstToken = tokens[0]?.toLowerCase();
 	const actionOffset = firstToken === "beta" ? 1 : 0;
@@ -925,7 +936,10 @@ async function dispatchVetteBetaPrompt(
 	if (isSelfReview || isDocReview) {
 		action = tokens[actionOffset + 1] ?? "now";
 	}
-	const config = await loadVetteBetaConfig();
+	const baseConfig = await loadVetteBetaConfig();
+	const config = forceLocal
+		? forceLocalVetteBetaConfig(baseConfig)
+		: baseConfig;
 	if (action === "models") {
 		ctx.ui.notify(
 			formatResolvedModelPool({
@@ -1183,7 +1197,10 @@ async function dispatchVetteBetaPrompt(
 		return;
 	}
 
-	const synthesisPrompt = formatVetteBetaSynthesisPrompt(result, { noPost });
+	const synthesisPrompt = formatVetteBetaSynthesisPrompt(result, {
+		noPost,
+		localOnly: forceLocal,
+	});
 
 	let totalIn = 0;
 	let totalOut = 0;
