@@ -7,6 +7,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_LOCAL_FALLBACK_SELECTORS } from "smart-model-run";
 import type { GhSnapshot } from "./gh-status/types.ts";
 
 type TextBlock = { type: "text"; text: string };
@@ -158,6 +159,9 @@ type ExecLike = ExtensionAPI["exec"];
 const DEFAULT_TIMEOUT_MS = 3 * 60_000;
 const LOCAL_MODEL_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_LOCAL_VETTE_MODEL = "ollama/ornith:35b";
+export const DEFAULT_LOCAL_VETTE_MODELS = [
+	...DEFAULT_LOCAL_FALLBACK_SELECTORS,
+];
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
@@ -415,18 +419,77 @@ function normalizeModelEntry(entry: VetteBetaModelEntry): VetteBetaModelEntry {
 	};
 }
 
+function modelSizeBillions(selector: string): number {
+	const id = modelId(selector).toLowerCase();
+	const matches = [...id.matchAll(/(\d+(?:\.\d+)?)\s*b\b/g)];
+	if (matches.length === 0) return 0;
+	return Math.max(
+		...matches.map((match) => Number.parseFloat(match[1] ?? "0")),
+	);
+}
+
+function localModelRank(selector: string): number {
+	const normalized = selector.trim().toLowerCase();
+	const curatedIndex = DEFAULT_LOCAL_VETTE_MODELS.findIndex(
+		(model) => model.toLowerCase() === normalized,
+	);
+	if (curatedIndex >= 0) return 10_000 - curatedIndex * 100;
+	const id = modelId(selector).toLowerCase();
+	let score = modelSizeBillions(selector) * 10;
+	if (/coder|code|dev|ornith|qwen/.test(id)) score += 50;
+	if (/instruct|chat/.test(id)) score += 10;
+	return score;
+}
+
+export function rankedLocalVetteModels(
+	modelRegistry?: ModelRegistryLike,
+): VetteBetaModelEntry[] {
+	const candidates = new Map<string, VetteBetaModelEntry>();
+	for (const model of DEFAULT_LOCAL_VETTE_MODELS) {
+		candidates.set(
+			model,
+			normalizeModelEntry({
+				model,
+				thinking: "off",
+			}),
+		);
+	}
+	for (const model of modelRegistry?.getAvailable?.() ?? []) {
+		const selector = `${model.provider}/${model.id}`;
+		if (!isLocalModelSelector(selector)) continue;
+		candidates.set(
+			selector,
+			normalizeModelEntry({
+				model: selector,
+				thinking: "off",
+			}),
+		);
+	}
+	return [...candidates.values()].sort((left, right) => {
+		const rankDelta = localModelRank(right.model) - localModelRank(left.model);
+		if (rankDelta !== 0) return rankDelta;
+		const contextDelta =
+			(modelRegistry
+				?.getAvailable?.()
+				.find((model) => `${model.provider}/${model.id}` === right.model)
+				?.contextWindow ?? 0) -
+			(modelRegistry
+				?.getAvailable?.()
+				.find((model) => `${model.provider}/${model.id}` === left.model)
+				?.contextWindow ?? 0);
+		if (contextDelta !== 0) return contextDelta;
+		return left.model.localeCompare(right.model);
+	});
+}
+
 export function forceLocalVetteBetaConfig(
 	config: VetteBetaConfig,
+	modelRegistry?: ModelRegistryLike,
 ): VetteBetaConfig {
 	return {
 		modelPools: {
 			...config.modelPools,
-			local: [
-				normalizeModelEntry({
-					model: DEFAULT_LOCAL_VETTE_MODEL,
-					thinking: "off",
-				}),
-			],
+			local: rankedLocalVetteModels(modelRegistry),
 		},
 		vetteBeta: {
 			...config.vetteBeta,

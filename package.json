@@ -40,6 +40,9 @@
       "./extensions/gh-status/extension.ts"
     ]
   },
+  "dependencies": {
+    "smart-model-run": "0.2.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",

@@ -117,6 +117,24 @@ describe("draftPrPrompt", () => {
 		);
 		expect(prompt).toContain("marking PR ready for review");
 	});
+
+	it("carries local model mode into draft PR vetting", () => {
+		const prompt = draftPrPrompt(
+			{
+				branch: "feature/x",
+				baseBranch: "main",
+				localIdentity: "Dev User <dev@example.com>",
+				dirtyStatus: "",
+				remoteUrl: "git@github.com:o/r.git",
+			},
+			"no open PR for branch",
+			"--local",
+			{ wantsPosting: false, wantsWatch: true, forceLocal: true },
+		);
+
+		expect(prompt).toContain("Local model mode (--local)");
+		expect(prompt).toContain("Do not use remote/cloud model fallbacks");
+	});
 });
 
 describe("inferLocalOwnership", () => {

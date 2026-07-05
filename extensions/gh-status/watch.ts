@@ -13,6 +13,8 @@ const WATCH_INTERVAL_LABEL = "15m";
 export type WatchOptions = {
 	/** Report findings via UI notifications only; never queue an agent turn. */
 	notifyOnly?: boolean;
+	/** Prefer local-only model execution for queued investigation turns. */
+	forceLocal?: boolean;
 };
 
 export type WatchFinding =
@@ -137,6 +139,7 @@ type QueueWatchInvestigationInput = {
 	snapshot: GhSnapshot;
 	findings: readonly WatchFinding[];
 	status: WatchStatusSummary;
+	forceLocal?: boolean;
 };
 
 type WatchState = {
@@ -146,6 +149,7 @@ type WatchState = {
 	inFlight: boolean;
 	runId: number;
 	notifyOnly: boolean;
+	forceLocal: boolean;
 	lastSnapshot?: GhSnapshot;
 };
 
@@ -244,7 +248,11 @@ function collectFindings(
 	];
 }
 
-function formatPrompt(snapshot: GhSnapshot, findings: WatchFinding[]): string {
+function formatPrompt(
+	snapshot: GhSnapshot,
+	findings: WatchFinding[],
+	options: { forceLocal?: boolean } = {},
+): string {
 	const findingLines = findings.map((finding) => {
 		const author =
 			"author" in finding && finding.author ? ` @${finding.author}` : "";
@@ -269,6 +277,11 @@ function formatPrompt(snapshot: GhSnapshot, findings: WatchFinding[]): string {
 		...findingLines,
 		`<<<UNTRUSTED_CONTENT_END>>>`,
 		``,
+		...(options.forceLocal
+			? [
+					`Local model mode (--local): prefer local model execution for every spawned investigation or repair agent; when smart-model-run local selection is available, pass its local-only option and do not use remote/cloud fallbacks unless the user explicitly authorizes leaving local mode.`,
+				]
+			: []),
 		`Use TDD for any fix path: write the smallest failing test first, make the smallest code change, then run the focused verification.`,
 		`If reference-app behavior matters, use the nlm CLI to inspect it before changing code.`,
 		`Spawn focused subagents only for the new items above.`,
@@ -453,12 +466,12 @@ function appendWatchCheck(pi: ExtensionAPI, input: BuildCheckLogInput): void {
 }
 
 function queueWatchInvestigation(input: QueueWatchInvestigationInput): void {
-	const { pi, ctx, snapshot, findings, status } = input;
+	const { pi, ctx, snapshot, findings, status, forceLocal } = input;
 	notifyWatchUi(ctx, formatWatchNotification(findings, status), "warning");
 	pi.sendMessage(
 		{
 			customType: "the-watch-watch-trigger",
-			content: formatPrompt(snapshot, [...findings]),
+			content: formatPrompt(snapshot, [...findings], { forceLocal }),
 			display: true,
 		},
 		{ triggerTurn: true },
@@ -532,6 +545,7 @@ async function runWatchTick(
 			snapshot,
 			findings,
 			status: watchStatus,
+			forceLocal: state.forceLocal,
 		});
 		return true;
 	} catch (error) {
@@ -557,6 +571,7 @@ function initializeWatchState(
 	options: WatchOptions,
 ): void {
 	state.notifyOnly = options.notifyOnly ?? false;
+	state.forceLocal = options.forceLocal ?? false;
 	state.running = true;
 	state.inFlight = false;
 	state.runId += 1;
@@ -568,7 +583,7 @@ function notifyWatchStarted(ctx: WatchTickContext, state: WatchState): void {
 	updateStatus(ctx, WATCH_ACTIVE_STATUS);
 	notifyWatchUi(
 		ctx,
-		`Watch started (every ${WATCH_INTERVAL_LABEL}${state.notifyOnly ? ", notify-only" : ""}); performing initial sweep of all PR items.`,
+		`Watch started (every ${WATCH_INTERVAL_LABEL}${state.notifyOnly ? ", notify-only" : ""}${state.forceLocal ? ", local models" : ""}); performing initial sweep of all PR items.`,
 		"info",
 	);
 }
@@ -668,7 +683,7 @@ function stopWatch(
 
 function watchStatus(state: WatchState): string {
 	if (!state.running) return "Watch is not running.";
-	return `Watch running every ${WATCH_INTERVAL_LABEL}${state.notifyOnly ? " (notify-only)" : ""}${state.lastSnapshot?.pr.kind === "pr" ? ` for PR #${state.lastSnapshot.pr.number}` : ""}.`;
+	return `Watch running every ${WATCH_INTERVAL_LABEL}${state.notifyOnly ? " (notify-only)" : ""}${state.forceLocal ? " (local models)" : ""}${state.lastSnapshot?.pr.kind === "pr" ? ` for PR #${state.lastSnapshot.pr.number}` : ""}.`;
 }
 
 export function createWatchController(
@@ -682,6 +697,7 @@ export function createWatchController(
 		inFlight: false,
 		runId: 0,
 		notifyOnly: false,
+		forceLocal: false,
 	};
 	const runtime: WatchRuntime = { pi, refreshController, state };
 

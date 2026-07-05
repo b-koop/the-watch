@@ -403,6 +403,33 @@ describe("createWatchController", () => {
 		expect(controller.status()).toContain("notify-only");
 	});
 
+	it("adds local model instructions to queued investigation messages", async () => {
+		vi.useFakeTimers();
+		const refresh = vi.fn().mockResolvedValue(
+			prSnapshot({
+				checks: [{ name: "ci", bucket: "fail", sha: "abc" }],
+				headSha: "abc",
+			}),
+		);
+		const refreshController = {
+			refresh,
+			getSnapshot: () => prSnapshot(),
+		} as unknown as RefreshController;
+		const pi = fakePi();
+		const ctx = fakeContext();
+		const controller = createWatchController(pi, refreshController);
+
+		await controller.start(ctx, { forceLocal: true });
+
+		expect(controller.status()).toContain("local models");
+		expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+		const message = vi.mocked(pi.sendMessage).mock.calls[0][0] as {
+			content: string;
+		};
+		expect(message.content).toContain("Local model mode (--local)");
+		expect(message.content).toContain("do not use remote/cloud fallbacks");
+	});
+
 	it("delimits finding content as untrusted data in the investigation message", async () => {
 		vi.useFakeTimers();
 		const refresh = vi.fn().mockResolvedValue(

@@ -300,7 +300,7 @@ function registerWatchCommand(
 ): void {
 	pi.registerCommand("watch", {
 		description:
-			"Watch the current PR for blockers. Subcommands: start [--notify-only], status, stop, now.",
+			"Watch the current PR for blockers. Subcommands: start [--notify-only] [--local], status, stop, now.",
 		getArgumentCompletions: watchCompletions,
 		handler: async (args, ctx) => {
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -308,9 +308,11 @@ function registerWatchCommand(
 			const words = tokens.filter((token) => !token.startsWith("--"));
 			const [subcommand = "start"] = words;
 			const notifyOnly = flags.includes("--notify-only");
+			const forceLocal =
+				flags.includes("--local") || flags.includes("--force-local");
 			switch (subcommand.toLowerCase()) {
 				case "start":
-					await watchController.start(ctx, { notifyOnly });
+					await watchController.start(ctx, { notifyOnly, forceLocal });
 					return;
 				case "status":
 					ctx.ui.notify(watchController.status(), "info");
@@ -323,7 +325,7 @@ function registerWatchCommand(
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /watch [start [--notify-only]|status|stop|now]",
+						"Usage: /watch [start [--notify-only] [--local]|status|stop|now]",
 						"warning",
 					);
 			}

@@ -726,7 +726,7 @@ describe("ghStatusExtension", () => {
 		expect(ctx.ui.notify).toHaveBeenCalledWith("Watch is not running.", "info");
 		await watchCommand.handler("wat", ctx);
 		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Usage: /watch [start [--notify-only]|status|stop|now]",
+			"Usage: /watch [start [--notify-only] [--local]|status|stop|now]",
 			"warning",
 		);
 		expect([...tools.keys()]).toEqual(

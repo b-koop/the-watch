@@ -160,6 +160,7 @@ function parseArgs(args: string): {
 	wantsScope: boolean;
 	wantsWatch: boolean;
 	noPost: boolean;
+	forceLocal: boolean;
 	raw: string;
 } {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -168,6 +169,7 @@ function parseArgs(args: string): {
 	const selector = positional[0] ?? "";
 	const wantsScope = flags.has("--scope") || flags.has("--service");
 	const noPost = flags.has("--no-post") || flags.has("--dry-run");
+	const forceLocal = flags.has("--local") || flags.has("--force-local");
 	return {
 		selector,
 		scopeTarget: positional.join(" ") || (wantsScope ? "." : ""),
@@ -179,6 +181,7 @@ function parseArgs(args: string): {
 		wantsScope,
 		wantsWatch: !flags.has("--no-watch"),
 		noPost,
+		forceLocal,
 		raw: args.trim(),
 	};
 }
@@ -627,6 +630,15 @@ function subagentContract(): string {
 - Commit/push only after parent review of agent output and passing verification. Never force push.`;
 }
 
+function localModelContract(forceLocal: boolean): string {
+	if (!forceLocal) return "";
+	return `Local model mode (--local):
+- Prefer local model execution for every spawned review, repair, investigation, or verification agent.
+- When a command/tool supports smart-model-run local selection, pass its local-only option so it ranks local providers only.
+- Use local providers such as ollama, lmstudio, or local, with fallback from stronger code/review models to smaller 7B/8B models when larger models are unavailable.
+- Do not use remote/cloud model fallbacks unless the user explicitly authorizes leaving local mode.`;
+}
+
 function parallelSuggestionContract(): string {
 	return `Required parallel suggestion lanes:
 - Run these read-only lanes in parallel before choosing fixes or comments: vette risk review, naming/test-name check, and thermo-nuclear-code-quality-review.
@@ -757,13 +769,14 @@ These items were verified but were not practical to demonstrate with focused uni
 function vettePrompt(
 	ctx: PrContext,
 	rawArgs: string,
-	options: { wantsPosting: boolean; noPost?: boolean },
+	options: { wantsPosting: boolean; noPost?: boolean; forceLocal?: boolean },
 ): string {
 	const commentPolicy = options.noPost
 		? "DRY RUN (--no-post): do not post any GitHub comments, reviews, or other externally visible output. Prepare comment-ready markdown for verified findings and present it in the final report only."
 		: options.wantsPosting
 			? "The user explicitly allowed posting comments, but posting is already automatic for verified external-review findings."
 			: "Post externally visible GitHub review comments automatically for verified external-review findings. Do not ask for additional posting approval after verification passes.";
+	const localModels = localModelContract(options.forceLocal === true);
 	const visibleStatusContract = `Visible status requirements:
 - Maintain an explicit status/todo sequence and update it immediately as phases change:
   1. Resolve PR context
@@ -779,26 +792,37 @@ function vettePrompt(
 - Do not leave the final phase in progress after returning the final report. End with "status: idle — vette complete".`;
 
 	if (ctx.isOwner) {
-		return `Run /vette owner repair mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- Local non-merge commit evidence indicates this PR branch is owned here, so do NOT draft or post PR review comments for findings.\n- Use evidence-first vette/pr-review techniques to find confirmed, user-impacting defects, weak tests, merge conflicts, failed checks, and review/bot comments that require action.\n- For each confirmed related finding, repair it through strict TDD: red test, red verification, green implementation, reviewer/verifier, refactor gate.\n- Spawn focused subagents according to the contract below for every non-trivial failure/finding.\n- Verify locally with focused commands, then broader checks when appropriate.\n- Commit and push focused fixes when verification passes and the repository state is safe.\n- If a finding is real but out of scope, document it in the final report instead of bloating this PR.\n- If the worktree was dirty before this command, protect pre-existing changes and report how they were handled before any repair action.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nFinish with PR URL, fixes made, commits pushed, findings artifact path, exact verification commands/results, and any blockers.\n\nComment policy: owner PR mode must not draft or post PR review comments.`;
+		return `Run /vette owner repair mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\n${localModels ? `${localModels}\n\n` : ""}Mandatory behavior:\n- Local non-merge commit evidence indicates this PR branch is owned here, so do NOT draft or post PR review comments for findings.\n- Use evidence-first vette/pr-review techniques to find confirmed, user-impacting defects, weak tests, merge conflicts, failed checks, and review/bot comments that require action.\n- For each confirmed related finding, repair it through strict TDD: red test, red verification, green implementation, reviewer/verifier, refactor gate.\n- Spawn focused subagents according to the contract below for every non-trivial failure/finding.\n- Verify locally with focused commands, then broader checks when appropriate.\n- Commit and push focused fixes when verification passes and the repository state is safe.\n- If a finding is real but out of scope, document it in the final report instead of bloating this PR.\n- If the worktree was dirty before this command, protect pre-existing changes and report how they were handled before any repair action.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nFinish with PR URL, fixes made, commits pushed, findings artifact path, exact verification commands/results, and any blockers.\n\nComment policy: owner PR mode must not draft or post PR review comments.`;
 	}
 
-	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\nMandatory behavior:\n- Local non-merge commit evidence does not show this PR branch is owned here, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason.
+	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\n${localModels ? `${localModels}\n\n` : ""}Mandatory behavior:\n- Local non-merge commit evidence does not show this PR branch is owned here, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason.
 - Prepare GitHub review comments that follow the repo comment contract: exact file/line when available, user impact, local evidence, fix boundary, and suggested tests when appropriate. For every substantive finding, put a one-sentence bug reason in the \`<summary>\` and keep evidence/verification inside the expanded \`<details>\` body. For test-reproducible findings, include the exact failing test code in the associated comment body.
 - After all verification and cleanup is complete, post verified comments in one posting pass. Prefer file/line comments, fall back to file-level comments when line placement is not possible, and fall back to a general PR comment when the file is not a good comment target.
 - Build and post one singular final PR comment for verified-but-untestable findings, including file/line information for every item where possible; each finding must be its own \`<details>\` block with a concise summary.
 - Post only findings that passed the verification gate; reject or report unverified suggestions without posting them.\n- ${commentPolicy}\n- Do not implement repairs on someone else's PR unless the user explicitly asks after seeing the review.\n\nUse these existing skills/instructions by prompt routing as relevant: pr-review, vette, naming, test-name, and thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentTestContract()}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\nFinish with review disposition, commands/results, findings artifact path, comments prepared and posted, rejected findings, untestable-items comment URL/status, and cleanup status.`;
 }
 
-function scopeVettePrompt(ctx: ScopeVetteContext, rawArgs: string): string {
-	return `Run /vette scope bug-discovery mode. This is not a PR review: audit the requested service/module/scope, validate likely bugs, build focused repro tests where practical, and draft local bug tickets only.\n\n${scopeVetteSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\nVisible status requirements:\n- Maintain an explicit status/todo sequence and update it immediately as phases change:\n  1. Resolve and map target scope\n  2. Run parallel risk lanes\n  3. Synthesize candidate bugs\n  4. Verify candidates with evidence and repro tests where practical\n  5. Write local bug-ticket drafts\n  6. Complete\n- While active, state the current phase in plain text, e.g. "working on (2/6): running parallel risk lanes".\n- End with "status: idle — scope vette complete" and counts for candidates, verified bugs, bug drafts written, rejected items, blocked items, and test-backed drafts.\n\nMandatory behavior:\n- Treat ${ctx.target} as the audit boundary. It may be a full service, module, package, directory, route group, job, or subsystem. First identify its entry points, dependencies, data stores, side effects, tests, and owner-facing behavior.\n- Run read-only risk lanes in parallel before deciding what deserves verification: vette risk review, naming/test-name check, and thermo-nuclear-code-quality-review. For broad service scopes, add focused lanes for API/contract boundaries, data consistency, async/job behavior, error handling, and observability where relevant.\n- Promote only verified, user-impacting defects to bug-ticket drafts. Verification can be static proof, a focused command, a runtime observation, or a temporary focused failing test.\n- For each candidate where a focused unit/regression/integration test is practical, build the smallest repro test, run the focused command, and prove it fails for the expected reason. Clean up temporary test files unless the user explicitly asks to keep them, but preserve exact test code and failing output in the draft.\n- Do not edit production code or implement fixes in scope mode unless the user explicitly asks after reading the drafts.\n- Do not create GitHub issues, Linear tickets, PR comments, or commits. Write local Markdown drafts only.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, tdd, pr-review, naming, test-name, and thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContractForPath(ctx.findingsPath)}\n\n${bugDraftContract(ctx)}\n\n${subagentContract()}\n\nFinish with target scope, drafts directory, findings artifact path, verification commands/results, repro test summary, draft filenames, rejected findings, blocked findings, and cleanup status.`;
+function scopeVettePrompt(
+	ctx: ScopeVetteContext,
+	rawArgs: string,
+	options: { forceLocal?: boolean } = {},
+): string {
+	const localModels = localModelContract(options.forceLocal === true);
+	return `Run /vette scope bug-discovery mode. This is not a PR review: audit the requested service/module/scope, validate likely bugs, build focused repro tests where practical, and draft local bug tickets only.\n\n${scopeVetteSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${localModels ? `${localModels}\n\n` : ""}Visible status requirements:\n- Maintain an explicit status/todo sequence and update it immediately as phases change:\n  1. Resolve and map target scope\n  2. Run parallel risk lanes\n  3. Synthesize candidate bugs\n  4. Verify candidates with evidence and repro tests where practical\n  5. Write local bug-ticket drafts\n  6. Complete\n- While active, state the current phase in plain text, e.g. "working on (2/6): running parallel risk lanes".\n- End with "status: idle — scope vette complete" and counts for candidates, verified bugs, bug drafts written, rejected items, blocked items, and test-backed drafts.\n\nMandatory behavior:\n- Treat ${ctx.target} as the audit boundary. It may be a full service, module, package, directory, route group, job, or subsystem. First identify its entry points, dependencies, data stores, side effects, tests, and owner-facing behavior.\n- Run read-only risk lanes in parallel before deciding what deserves verification: vette risk review, naming/test-name check, and thermo-nuclear-code-quality-review. For broad service scopes, add focused lanes for API/contract boundaries, data consistency, async/job behavior, error handling, and observability where relevant.\n- Promote only verified, user-impacting defects to bug-ticket drafts. Verification can be static proof, a focused command, a runtime observation, or a temporary focused failing test.\n- For each candidate where a focused unit/regression/integration test is practical, build the smallest repro test, run the focused command, and prove it fails for the expected reason. Clean up temporary test files unless the user explicitly asks to keep them, but preserve exact test code and failing output in the draft.\n- Do not edit production code or implement fixes in scope mode unless the user explicitly asks after reading the drafts.\n- Do not create GitHub issues, Linear tickets, PR comments, or commits. Write local Markdown drafts only.\n\nUse these existing skills/instructions by prompt routing as relevant: vette, tdd, pr-review, naming, test-name, and thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContractForPath(ctx.findingsPath)}\n\n${bugDraftContract(ctx)}\n\n${subagentContract()}\n\nFinish with target scope, drafts directory, findings artifact path, verification commands/results, repro test summary, draft filenames, rejected findings, blocked findings, and cleanup status.`;
 }
 
 function prPrompt(
 	ctx: PrContext,
 	rawArgs: string,
-	options: { wantsPosting: boolean; wantsWatch: boolean; noPost?: boolean },
+	options: {
+		wantsPosting: boolean;
+		wantsWatch: boolean;
+		noPost?: boolean;
+		forceLocal?: boolean;
+	},
 ): string {
-	return `Run /pr preparation, vette, repair, and monitoring mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, progress like "working on (1/1)", and the next check time.\n- On every watch check, inspect the PR lifecycle with \`gh pr view ${ctx.pr.number} --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #${ctx.pr.number} is merged; watch closed".\n- When no actionable issue/comment/check failure is present, state "idle until <time>" instead of spawning agents.\n- When a new actionable issue appears, state "working on (n/total)" and only then spin up the focused code agent for that issue.\n\nObjectives:\n1. Resolve and validate the integration base/target branch. Prefer the PR base branch already shown above; verify it exists remotely before diffing or updating.\n2. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n3. Analyze the current PR title/body against the template and rules. Plan exact updates needed; apply safe title/body fixes when appropriate.\n4. Run the same PR-aware /vette behavior internally:\n   - Owner PR: no comments; find and fix confirmed issues through TDD-focused subagents.\n   - External PR: evidence-backed review comments are posted automatically after all verification is complete. At the end of synthesis, create focused unit/regression repro tests for comment-worthy findings where practical, verify those tests fail for the expected reason, include the exact test code in the templated associated comment body, then post verified items in one pass using file/line comments when possible, file-level comments when line placement is not possible, and general PR comments as the fallback. Build one singular templated final comment for verified-but-untestable items with file/line context whenever possible.\n5. Detect merge conflicts and resolve related conflicts through a focused merge-conflict resolver agent.\n6. Inspect CI with \`gh pr checks\` as the source of truth. For failed checks, classify related/unrelated/uncertain. Treat uncertain as related until proven otherwise.\n7. Fix related failures with focused code/TDD subagents. For unrelated flaky/infrastructure failures, retry once when safe, document evidence, and avoid bloating this PR.\n8. Inspect PR comments, reviews, BugBot/bot alerts, and new commits. Spin up code/fix agents only when a new actionable issue/comment/check failure appears.\n9. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass and report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: pull-request, vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\n${subagentContract()}\n\nSafety rules:
+	const localModels = localModelContract(options.forceLocal === true);
+	return `Run /pr preparation, vette, repair, and monitoring mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\n${localModels ? `${localModels}\n\n` : ""}Visible status and timing requirements:\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, progress like "working on (1/1)", and the next check time.\n- On every watch check, inspect the PR lifecycle with \`gh pr view ${ctx.pr.number} --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #${ctx.pr.number} is merged; watch closed".\n- When no actionable issue/comment/check failure is present, state "idle until <time>" instead of spawning agents.\n- When a new actionable issue appears, state "working on (n/total)" and only then spin up the focused code agent for that issue.\n\nObjectives:\n1. Resolve and validate the integration base/target branch. Prefer the PR base branch already shown above; verify it exists remotely before diffing or updating.\n2. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n3. Analyze the current PR title/body against the template and rules. Plan exact updates needed; apply safe title/body fixes when appropriate.\n4. Run the same PR-aware /vette behavior internally:\n   - Owner PR: no comments; find and fix confirmed issues through TDD-focused subagents.\n   - External PR: evidence-backed review comments are posted automatically after all verification is complete. At the end of synthesis, create focused unit/regression repro tests for comment-worthy findings where practical, verify those tests fail for the expected reason, include the exact test code in the templated associated comment body, then post verified items in one pass using file/line comments when possible, file-level comments when line placement is not possible, and general PR comments as the fallback. Build one singular templated final comment for verified-but-untestable items with file/line context whenever possible.\n5. Detect merge conflicts and resolve related conflicts through a focused merge-conflict resolver agent.\n6. Inspect CI with \`gh pr checks\` as the source of truth. For failed checks, classify related/unrelated/uncertain. Treat uncertain as related until proven otherwise.\n7. Fix related failures with focused code/TDD subagents. For unrelated flaky/infrastructure failures, retry once when safe, document evidence, and avoid bloating this PR.\n8. Inspect PR comments, reviews, BugBot/bot alerts, and new commits. Spin up code/fix agents only when a new actionable issue/comment/check failure appears.\n9. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass and report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: pull-request, vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\n${subagentContract()}\n\nSafety rules:
 - Report dirty worktree state before repair actions and protect pre-existing changes.\n- ${options.noPost ? "DRY RUN (--no-post): do not post any GitHub comments or reviews; prepare comment-ready markdown for verified findings and present it in the final report only." : `For external PR review findings, post only verified comments automatically; unverified suggestions must be rejected or reported without posting. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.`}\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
 
@@ -806,9 +830,10 @@ export function draftPrPrompt(
 	ctx: DraftPrContext,
 	resolveError: string,
 	rawArgs: string,
-	options: { wantsPosting: boolean; wantsWatch: boolean },
+	options: { wantsPosting: boolean; wantsWatch: boolean; forceLocal?: boolean },
 ): string {
-	return `Run /pr draft-first creation, vette, repair, and monitoring mode for this branch. No existing pull request was resolved, so push the branch and open a DRAFT pull request immediately, then vette while the human reviews the draft in parallel.\n\n${draftPrSummary(ctx, resolveError)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\nVisible status and timing requirements:\n- First state "working on (1/4): pushing branch and creating draft PR".\n- After the draft PR exists, state "working on (2/4): vetting branch while draft PR is under human review" and share the PR URL so the human can start reviewing right away.\n- After vette/repair and CI verification pass, state "working on (3/4): marking PR ready for review" and run \`gh pr ready <created-pr-number-or-url>\`.\n- Then state "working on (4/4): monitoring PR" and use the created PR URL/number for all PR-aware checks.\n- Check immediately, then use a 15-minute cadence while watching.
+	const localModels = localModelContract(options.forceLocal === true);
+	return `Run /pr draft-first creation, vette, repair, and monitoring mode for this branch. No existing pull request was resolved, so push the branch and open a DRAFT pull request immediately, then vette while the human reviews the draft in parallel.\n\n${draftPrSummary(ctx, resolveError)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\n${localModels ? `${localModels}\n\n` : ""}Visible status and timing requirements:\n- First state "working on (1/4): pushing branch and creating draft PR".\n- After the draft PR exists, state "working on (2/4): vetting branch while draft PR is under human review" and share the PR URL so the human can start reviewing right away.\n- After vette/repair and CI verification pass, state "working on (3/4): marking PR ready for review" and run \`gh pr ready <created-pr-number-or-url>\`.\n- Then state "working on (4/4): monitoring PR" and use the created PR URL/number for all PR-aware checks.\n- Check immediately, then use a 15-minute cadence while watching.
 - Before every wait, state the current PR status, what was checked, whether you are working or idle, and the next check time.
 - After the PR exists, every watch check must inspect the PR lifecycle with \`gh pr view <created-pr-number-or-url> --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #<number> is merged; watch closed".\n\nObjectives:\n1. Validate the working branch and base. Use current branch ${ctx.branch} as the PR head. Prefer ${ctx.baseBranch} as the base, but verify the remote base exists and adjust only when repository policy clearly requires a different base.\n2. Protect pre-existing dirty worktree changes. Report them before any push or repair action and avoid overwriting unrelated user changes.\n3. Create the draft PR first so human review and agent checks run in parallel: inspect repository PR rules and standards (.github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, target-branch expectations), prepare a concise title and body that satisfy the template, push the branch, then create the pull request with \`gh pr create --draft\` targeting the validated base. Do not require the user to provide a branch, PR number, or URL. Report the PR URL immediately after creation.\n4. With the draft PR up, run the same owner-side /vette behavior internally against the branch diff from the base: run parallel vette, name-check, and thermo-nuclear lanes; verify every confirmed issue; repair confirmed defects through TDD-focused subagents; run focused verification; and push fixes to the PR branch as they pass so the human always reviews the latest state.\n5. While vetting, also validate title/body/base against the template, inspect merge conflicts, and inspect CI with \`gh pr checks\`; fix related failures with focused TDD/code subagents.\n6. When vette/repair is complete and CI is green (or only unrelated failures remain, documented with evidence), mark the PR ready for review with \`gh pr ready\`. If vette finds blocking defects that cannot be repaired safely, leave the PR in draft and report the blockers instead.\n7. After marking ready, continue with the normal /pr behavior: monitor comments/reviews/BugBot/bot alerts/new commits, and fix related failures with focused TDD/code subagents.\n8. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass through draft PR creation, vette, and initial validation, then report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${draftFindingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n- Verified external-review posting rules only apply after a PR exists. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n\nFinish with PR URL, draft-to-ready transition status, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
@@ -837,8 +862,11 @@ async function dispatchVettePrompt(
 			? vettePrompt(vetteCommandContext.prContext, parsed.raw, {
 					wantsPosting: parsed.wantsPosting,
 					noPost: parsed.noPost,
+					forceLocal: parsed.forceLocal,
 				})
-			: scopeVettePrompt(vetteCommandContext.scopeContext, parsed.raw);
+			: scopeVettePrompt(vetteCommandContext.scopeContext, parsed.raw, {
+					forceLocal: parsed.forceLocal,
+				});
 	const queued = !ctx.isIdle();
 	onResolved?.(vetteCommandContext, parsed, { queued });
 
@@ -936,18 +964,19 @@ async function dispatchVetteBetaPrompt(
 	if (isSelfReview || isDocReview) {
 		action = tokens[actionOffset + 1] ?? "now";
 	}
+	const modelRegistry = (ctx as unknown as { modelRegistry?: unknown })
+		.modelRegistry as
+		| undefined
+		| Parameters<typeof formatResolvedModelPool>[0]["modelRegistry"];
 	const baseConfig = await loadVetteBetaConfig();
 	const config = forceLocal
-		? forceLocalVetteBetaConfig(baseConfig)
+		? forceLocalVetteBetaConfig(baseConfig, modelRegistry)
 		: baseConfig;
 	if (action === "models") {
 		ctx.ui.notify(
 			formatResolvedModelPool({
 				config,
-				modelRegistry: (ctx as unknown as { modelRegistry?: unknown })
-					.modelRegistry as
-					| undefined
-					| Parameters<typeof formatResolvedModelPool>[0]["modelRegistry"],
+				modelRegistry,
 			}),
 			"info",
 		);
@@ -973,10 +1002,7 @@ async function dispatchVetteBetaPrompt(
 	}
 	const resolvedPool = resolveModelPool({
 		config,
-		modelRegistry: (ctx as unknown as { modelRegistry?: unknown })
-			.modelRegistry as
-			| undefined
-			| Parameters<typeof resolveModelPool>[0]["modelRegistry"],
+		modelRegistry,
 	});
 	const firstLaunchModel =
 		resolvedPool.entries.find((entry) => entry.availability !== "missing") ??
@@ -1300,6 +1326,7 @@ async function dispatchPrPrompt(
 					wantsPosting: parsed.wantsPosting,
 					wantsWatch: parsed.wantsWatch,
 					noPost: parsed.noPost,
+					forceLocal: parsed.forceLocal,
 				})
 			: draftPrPrompt(
 					prCommandContext.draftContext,
@@ -1308,6 +1335,7 @@ async function dispatchPrPrompt(
 					{
 						wantsPosting: parsed.wantsPosting,
 						wantsWatch: parsed.wantsWatch,
+						forceLocal: parsed.forceLocal,
 					},
 				);
 

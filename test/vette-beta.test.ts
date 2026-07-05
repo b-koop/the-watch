@@ -15,6 +15,7 @@ import {
 	formatResolvedModelPool,
 	forceLocalVetteBetaConfig,
 	formatVetteBetaSynthesisPrompt,
+	rankedLocalVetteModels,
 	groundTopicFindings,
 	parseChildModelList,
 	parseVetteBetaConfig,
@@ -208,7 +209,7 @@ describe("vette beta config", () => {
 		]);
 	});
 
-	it("forces local reviews to use the verified 35B local model only", () => {
+	it("forces local reviews to use ranked local model fallbacks", () => {
 		const config = forceLocalVetteBetaConfig(
 			parseVetteBetaConfig(
 				JSON.stringify({
@@ -223,16 +224,46 @@ describe("vette beta config", () => {
 		);
 
 		expect(config.vetteBeta.modelPool).toBe("local");
-		expect(config.modelPools.local).toEqual([
-			{
-				model: "ollama/ornith:35b",
-				thinking: "off",
-				timeoutMs: 1_800_000,
-			},
+		expect(
+			config.modelPools.local?.map((entry) => entry.model).slice(0, 3),
+		).toEqual([
+			"ollama/ornith:35b",
+			"ollama/qwen2.5-coder:32b",
+			"ollama/qwen2.5-coder:14b",
 		]);
+		expect(config.modelPools.local).toContainEqual({
+			model: "ollama/qwen2.5-coder:7b",
+			thinking: "off",
+			timeoutMs: 1_800_000,
+		});
 		expect(
 			resolveModelPool({ config }).entries.map((entry) => entry.model),
-		).toEqual(["ollama/ornith:35b"]);
+		).toContain("ollama/ornith:7b");
+	});
+
+	it("adds available local registry models by best-fit rank", () => {
+		const models = rankedLocalVetteModels({
+			getAvailable: () => [
+				{ provider: "ollama", id: "small-code:7b", contextWindow: 32_000 },
+				{ provider: "ollama", id: "big-general:70b", contextWindow: 8_000 },
+				{ provider: "openai", id: "gpt-5-mini", contextWindow: 128_000 },
+			],
+		});
+
+		expect(models.map((entry) => entry.model)).toContain(
+			"ollama/small-code:7b",
+		);
+		expect(models.map((entry) => entry.model)).toContain(
+			"ollama/big-general:70b",
+		);
+		expect(models.map((entry) => entry.model)).not.toContain(
+			"openai/gpt-5-mini",
+		);
+		expect(
+			models.findIndex((entry) => entry.model === "ollama/big-general:70b"),
+		).toBeLessThan(
+			models.findIndex((entry) => entry.model === "ollama/small-code:7b"),
+		);
 	});
 
 	it("allows topic thinking overrides while preserving defaults", () => {

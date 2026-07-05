@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      smart-model-run:
+        specifier: 0.2.0
+        version: 0.2.0
     devDependencies:
       '@earendil-works/pi-agent-core':
         specifier: '*'
@@ -893,6 +897,9 @@ packages:
 
   signal-exit@3.0.7:
     resolution: {integrity: sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ==}
+
+  smart-model-run@0.2.0:
+    resolution: {integrity: sha512-2GSZrmX+DKJ6szjfhuq/t9y5LhFPanpmDmuOaB/Ln7gDNlxFT220fQaUB6+RIMdspdzV6U1G+X0vv3yJTGVTIQ==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -2012,6 +2019,8 @@ snapshots:
   siginfo@2.0.0: {}
 
   signal-exit@3.0.7: {}
+
+  smart-model-run@0.2.0: {}
 
   source-map-js@1.2.1: {}
 

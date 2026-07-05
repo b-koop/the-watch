@@ -31,6 +31,9 @@ The parent session deduplicates and verifies findings before acting.
   action items locally only; it does not post PR comments, create TDD repro
   tests, or repair code.
 - `/vette models` — shows selected providers and model IDs.
+- Add `--local` or `--force-local` to force topic agents to use local-only
+  model selection. Local mode starts with stronger local review models and falls
+  back to smaller 7B/8B models when needed.
 
 #### `/vette old [pr|branch|url|scope] [--scope] [--post-comments]`
 
@@ -42,11 +45,12 @@ Legacy workflow with three modes:
 | External PR | Someone else's PR | Post verified findings as PR comments |
 | Scope | `--scope` flag or non-PR selector | Write local bug-draft Markdown files |
 
-### `/pr [pr|branch|url] [--post-comments] [--no-watch]`
+### `/pr [pr|branch|url] [--post-comments] [--no-watch] [--local]`
 
 End-to-end PR workflow: vettes the current branch, creates a PR if needed, then
 watches it. Handles the full lifecycle — merge conflicts, CI failures, review
-feedback, and bot activity — with focused subagents for fixes.
+feedback, and bot activity — with focused subagents for fixes. Add `--local` or
+`--force-local` to keep all review/repair/investigation agents on local models.
 
 Shows a live footer status:
 
@@ -54,7 +58,7 @@ Shows a live footer status:
 /pr PR #123 working (1/1) prepare/watch next 14m
 ```
 
-### `/watch [start|status|stop|now]`
+### `/watch [start|status|stop|now] [--local]`
 
 Monitors the current branch's open PR for blocking issues on a timer.
 
@@ -67,7 +71,8 @@ Monitors the current branch's open PR for blocking issues on a timer.
 
 Detects merge conflicts, failed checks, human comments/reviews, and BugBot
 activity. Prioritizes by severity and routes findings to the agent with fix
-instructions.
+instructions. Add `--local` or `--force-local` to request local-only model use
+for queued investigation turns.
 
 ### GitHub status
 
@@ -104,7 +109,7 @@ Optional config at `~/.pi/agent/the-watch.json`:
 ```
 
 Models are tried in array order with automatic fallback on failure. Default
-timeout is 3 minutes (10 minutes for `ollama/*`, `lmstudio/*`, `local/*`).
+timeout is 3 minutes (30 minutes for `ollama/*`, `lmstudio/*`, `local/*`).
 
 Per-topic thinking levels are also configurable via `vetteBeta.topicThinking`.
 
