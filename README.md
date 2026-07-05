@@ -69,10 +69,24 @@ Monitors the current branch's open PR for blocking issues on a timer.
 | `stop` | Stop monitoring |
 | `now` | Immediate check + restart timer |
 
+The watch function pings the PR approximately every 15 minutes to detect new
+comments, changes, or pending issues (e.g., merge conflicts, failed checks,
+BugBot activity, or review feedback).  It only triggers additional LLM
+tasks when new data is detected, so it stays lightweight when the PR is
+quiet.  Use `--local` or `--force-local` to restrict all intelligence to
+local models during investigation turns.
+
 Detects merge conflicts, failed checks, human comments/reviews, and BugBot
-activity. Prioritizes by severity and routes findings to the agent with fix
-instructions. Add `--local` or `--force-local` to request local-only model use
-for queued investigation turns.
+activity. Prioritizes by severity and routes findings to the agent with
+fix instructions.  Add `--local` or `--force-local` to request local-only
+model use for queued investigation turns.
+
+---
+
+The watch mechanism works by scheduling periodic checks (around every 15 minutes)
+and only escalates to LLM‑based analysis when changes or new content are
+detected, maintaining a balance between vigilance and resource usage. Use the
+subcommands to control its behavior as needed.
 
 ### GitHub status
 
