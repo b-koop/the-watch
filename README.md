@@ -20,8 +20,9 @@ pi -e .
 ### `/vette [pr|branch|url]`
 
 Multi-topic diff review. Lightweight agents review your worktree, PR, or branch
-in parallel across correctness, tests, error handling, security, contracts,
-async/state, naming, maintainability, requirements, and feature behavior specs.
+in parallel across correctness, tests, test mocking, error handling, security,
+contracts, async/state, naming, maintainability, requirements, and feature
+behavior specs.
 The parent session deduplicates and verifies findings before acting.
 
 - **External PRs** — posts verified review comments to the PR.

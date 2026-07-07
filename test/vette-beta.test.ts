@@ -163,6 +163,7 @@ describe("vette beta config", () => {
 		expect(defaultConfig.vetteBeta.topicThinking).toMatchObject({
 			correctness: "medium",
 			tests: "low",
+			"test-mocking": "low",
 			"error-handling": "medium",
 			"security-data": "high",
 			contracts: "medium",
@@ -172,6 +173,44 @@ describe("vette beta config", () => {
 			requirements: "medium",
 			"behavior-specs": "medium",
 		});
+	});
+
+	it("reviews changed test files for unnecessary mocking", () => {
+		const mockingTopic = VETTE_BETA_TOPICS.find(
+			(topic) => topic.id === "test-mocking",
+		);
+
+		expect(mockingTopic).toMatchObject({
+			id: "test-mocking",
+			label: "Test mocking",
+		});
+		expect(mockingTopic?.prompt).toContain("changed test files only");
+		expect(mockingTopic?.prompt).toContain("unnecessary mocks");
+		expect(mockingTopic?.prompt).toContain(
+			"real implementation or simple fake",
+		);
+		expect(mockingTopic?.prompt).toContain(
+			"expectations/assertions semantically match the code under test",
+		);
+		expect(mockingTopic?.prompt).toContain(
+			"generic truthiness, equality, or snapshot assertions",
+		);
+		expect(mockingTopic?.prompt).toContain("domain-specific matcher");
+		expect(mockingTopic?.prompt).toContain("TypeScript tests using jsdom");
+		expect(mockingTopic?.prompt).toContain(
+			".toBeInTheDocument() over .toBeTruthy()",
+		);
+		expect(mockingTopic?.prompt).toContain(".not.toBeInTheDocument()");
+		expect(mockingTopic?.prompt).toContain("question fireEvent usage");
+		expect(mockingTopic?.prompt).toContain(
+			"userEvent would better model real user behavior",
+		);
+		expect(mockingTopic?.prompt).toContain(
+			"async interactions, focus, typing, pointer, or keyboard flows",
+		);
+		expect(mockingTopic?.prompt).toContain(
+			"network, filesystem, time, randomness, external APIs, or expensive/flaky boundaries",
+		);
 	});
 
 	it("preserves ordered user model pools", () => {

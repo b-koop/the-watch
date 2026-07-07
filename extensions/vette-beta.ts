@@ -159,9 +159,7 @@ type ExecLike = ExtensionAPI["exec"];
 const DEFAULT_TIMEOUT_MS = 3 * 60_000;
 const LOCAL_MODEL_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_LOCAL_VETTE_MODEL = "ollama/ornith:35b";
-export const DEFAULT_LOCAL_VETTE_MODELS = [
-	...DEFAULT_LOCAL_FALLBACK_SELECTORS,
-];
+export const DEFAULT_LOCAL_VETTE_MODELS = [...DEFAULT_LOCAL_FALLBACK_SELECTORS];
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
 
@@ -306,6 +304,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 		topicThinking: {
 			correctness: "medium",
 			tests: "low",
+			"test-mocking": "low",
 			"error-handling": "medium",
 			"security-data": "high",
 			contracts: "medium",
@@ -330,6 +329,12 @@ export const VETTE_BETA_TOPICS: VetteBetaTopic[] = [
 		label: "Tests",
 		prompt:
 			"Detect missing assertions and false confidence only: gaps where tests would pass while the changed behavior is broken or unprotected.",
+	},
+	{
+		id: "test-mocking",
+		label: "Test mocking",
+		prompt:
+			"Review changed test files only. Detect broad test cleanup issues around unnecessary mocks, redundant stubs/spies, mocks of internal behavior better tested directly, or places where the real implementation or simple fake would be clearer. Also inspect whether expectations/assertions semantically match the code under test: flag generic truthiness, equality, or snapshot assertions when a domain-specific matcher would make the behavior clearer and harder to pass accidentally. For TypeScript tests using jsdom, enforce jest-dom presence assertions: prefer .toBeInTheDocument() over .toBeTruthy() for present elements and .not.toBeInTheDocument() over falsy/truthiness checks for absent elements. Also question fireEvent usage when userEvent would better model real user behavior, async interactions, focus, typing, pointer, or keyboard flows. Do not complain about justified isolation of network, filesystem, time, randomness, external APIs, or expensive/flaky boundaries; return no findings when no changed test files are relevant.",
 	},
 	{
 		id: "error-handling",
