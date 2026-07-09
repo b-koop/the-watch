@@ -303,7 +303,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 		subagentExtensions: [],
 		topicThinking: {
 			correctness: "medium",
-			tests: "low",
+			"test-scenarios": "low",
 			"test-mocking": "low",
 			"error-handling": "medium",
 			"security-data": "high",
@@ -325,16 +325,16 @@ export const VETTE_BETA_TOPICS: VetteBetaTopic[] = [
 			"Detect behavior regressions only: changed runtime behavior, missed branches, invalid assumptions, or correctness failures introduced by the diff.",
 	},
 	{
-		id: "tests",
-		label: "Tests",
+		id: "test-scenarios",
+		label: "Test scenarios",
 		prompt:
-			"Detect missing assertions and false confidence only: gaps where tests would pass while the changed behavior is broken or unprotected.",
+			"Detect missing regression-catching test scenarios: changed observable behavior with no test that would fail if that behavior regressed, missing edge-case scenario, missing negative-path scenario, missing boundary scenario, or a deleted/disabled test that leaves behavior without equivalent coverage elsewhere. You may call out important pre-existing scenario gaps discovered while reviewing the diff, but mark them as follow-up rather than required for the current change. Do not report test style, weak matcher wording, mocks, snapshots, duplicate tests, or user-event realism; those belong to the test quality lane.",
 	},
 	{
 		id: "test-mocking",
-		label: "Test mocking",
+		label: "Test quality",
 		prompt:
-			"Review changed test files only. Detect broad test cleanup issues around unnecessary mocks, redundant stubs/spies, mocks of internal behavior better tested directly, or places where the real implementation or simple fake would be clearer. Also inspect whether expectations/assertions semantically match the code under test: flag generic truthiness, equality, or snapshot assertions when a domain-specific matcher would make the behavior clearer and harder to pass accidentally. For TypeScript tests using jsdom, enforce jest-dom presence assertions: prefer .toBeInTheDocument() over .toBeTruthy() for present elements and .not.toBeInTheDocument() over falsy/truthiness checks for absent elements. Also question fireEvent usage when userEvent would better model real user behavior, async interactions, focus, typing, pointer, or keyboard flows. Do not complain about justified isolation of network, filesystem, time, randomness, external APIs, or expensive/flaky boundaries; return no findings when no changed test files are relevant.",
+			"Review changed test files only. Detect test quality issues: test names that do not accurately describe the behavior actually exercised and asserted; mocks/stubs/spies used where the dependency works inside an isolated test system and the real implementation or simple fake would be more honest; missing mocks/fakes for dependencies that do not work reliably in isolation, such as API calls, database access, external services, browser-only APIs, or components/web components that are not renderable in the test environment; multiple test cases that assert the same observable outcome without differing inputs, setup, or edge-case coverage (consider beforeEach/describe-level setup when judging distinctness); weak matchers (toBeTruthy, toBeFalsy, toBeDefined, or toBeUndefined as the sole assertion); brittle snapshots that capture noise such as generated class names, volatile values, or full DOM structure instead of the narrow behavior under test; and generic assertions where a domain-specific matcher would be clearer. For TypeScript tests using jsdom, prefer .toBeInTheDocument()/.not.toBeInTheDocument() for presence. Question fireEvent when userEvent would better model real async interactions, focus, typing, pointer, or keyboard behavior; fireEvent is acceptable for simple synchronous low-level DOM events. Flag brittle date/time tests where time is not frozen first, or where timezone/local-time/DST behavior is not pinned; prefer frozen time, and when freezing is not possible, harden the chosen timestamps/timezone expectations so the test is accurate without being flaky. Do not complain about justified isolation of network, filesystem, time, randomness, external APIs, expensive/flaky boundaries, or unrenderable platform components; return no findings when no changed test files are relevant.",
 	},
 	{
 		id: "error-handling",
@@ -588,6 +588,15 @@ function splitModelSelector(
 
 function modelProvider(selector: string): string {
 	return splitModelSelector(selector)?.provider ?? selector;
+}
+
+function fallbackProviderRank(provider: string): number {
+	const normalized = provider.toLowerCase();
+	if (normalized === "openai" || normalized === "openai-codex") return 0;
+	if (normalized === "cursor") return 1;
+	if (normalized === "google" || normalized === "anthropic") return 2;
+	if (normalized === "openrouter") return 3;
+	return 4;
 }
 
 function modelId(selector: string): string {
@@ -1152,10 +1161,18 @@ function discoverFallbackModels(
 		return true;
 	});
 
-	candidates.sort(
-		(left, right) =>
-			(left.contextWindow ?? 200_000) - (right.contextWindow ?? 200_000),
-	);
+	candidates.sort((left, right) => {
+		const providerDelta =
+			fallbackProviderRank(left.provider) -
+			fallbackProviderRank(right.provider);
+		if (providerDelta !== 0) return providerDelta;
+		const contextDelta =
+			(left.contextWindow ?? 200_000) - (right.contextWindow ?? 200_000);
+		if (contextDelta !== 0) return contextDelta;
+		return `${left.provider}/${left.id}`.localeCompare(
+			`${right.provider}/${right.id}`,
+		);
+	});
 
 	return candidates.map((model, index) => ({
 		model: `${model.provider}/${model.id}`,

@@ -20,6 +20,10 @@ import {
 	type VetteBetaReviewMode,
 	type VetteBetaReviewTarget,
 } from "./vette-beta.ts";
+import {
+	formatVetteReviewPrompt,
+	loadVetteReviewSections,
+} from "./vette-review.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -1073,6 +1077,34 @@ async function dispatchVetteBetaPrompt(
 		return `${input?.toLocaleString() ?? "?"}in/${output?.toLocaleString() ?? "?"}out`;
 	}
 
+	function truncateEnd(value: string, width: number): string {
+		if (value.length <= width) return value;
+		return `${value.slice(0, Math.max(0, width - 1))}…`;
+	}
+
+	function orderedTopicStates(): TopicState[] {
+		const statusRank: Record<TopicState["status"], number> = {
+			running: 0,
+			pending: 1,
+			done: 2,
+			failed: 2,
+		};
+		return [...topicStates.values()].sort(
+			(a, b) => statusRank[a.status] - statusRank[b.status],
+		);
+	}
+
+	function renderTopicLine(
+		icon: string,
+		state: TopicState,
+		detail: string,
+	): string {
+		const left = `${icon} ${state.label}${detail}`;
+		if (!state.model) return `  ${left}`;
+		const leftWidth = 58;
+		return `  ${truncateEnd(left, leftWidth).padEnd(leftWidth)}  ${state.model}`;
+	}
+
 	function renderProgressWidget(): string[] {
 		const now = Date.now();
 		const elapsed = fmtMs(now - phaseStartedAt);
@@ -1099,7 +1131,7 @@ async function dispatchVetteBetaPrompt(
 			lines.push(`  ${runningCount} running`);
 		}
 		lines.push("");
-		for (const state of topicStates.values()) {
+		for (const state of orderedTopicStates()) {
 			let icon: string;
 			let detail = "";
 			switch (state.status) {
@@ -1128,7 +1160,7 @@ async function dispatchVetteBetaPrompt(
 			} else if (state.avgMs) {
 				detail = ` ~${fmtMs(state.avgMs)}`;
 			}
-			lines.push(`  ${icon} ${state.label}${detail}`);
+			lines.push(renderTopicLine(icon, state, detail));
 		}
 		return lines;
 	}
@@ -1492,6 +1524,32 @@ function buildPrCommandStatus(
 	};
 }
 
+async function dispatchVetteReviewPrompt(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	const limitFlagIndex = tokens.indexOf("--limit");
+	const limit =
+		limitFlagIndex >= 0 ? Number(tokens[limitFlagIndex + 1]) : undefined;
+	const sections = await loadVetteReviewSections({ limit });
+	if (sections.length === 0) {
+		ctx.ui.notify(
+			"No saved review artifacts found under /tmp/pi-vette-findings or /tmp/pi-vette-bug-drafts.",
+			"warning",
+		);
+		return;
+	}
+	pi.sendUserMessage(formatVetteReviewPrompt(sections), {
+		deliverAs: ctx.isIdle() ? undefined : "followUp",
+	});
+	ctx.ui.notify(
+		`/vette review queued ${sections.length} artifact section${sections.length === 1 ? "" : "s"} for outcome analysis.`,
+		"info",
+	);
+}
+
 function getExtensionMtimes(): Record<string, number> {
 	const mtimes: Record<string, number> = {};
 	try {
@@ -1623,7 +1681,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("vette", {
 		description:
-			"Run lightweight beta diff agents by default. Use /vette old for the legacy PR/scope workflow.",
+			"Run lightweight beta diff agents by default. Use /vette old for the legacy PR/scope workflow or /vette review to analyze saved review artifacts.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const preCheck = checkExtensionUpdated(extensionLoadMtimes);
 			if (preCheck.updated) {
@@ -1643,6 +1701,10 @@ export default function (pi: ExtensionAPI) {
 					(vetteCommandContext, _parsed, options) =>
 						setVetteCommandStatus(ctx, vetteCommandContext, options),
 				);
+				return;
+			}
+			if (subcommand === "review") {
+				await dispatchVetteReviewPrompt(pi, tokens.slice(1).join(" "), ctx);
 				return;
 			}
 			await dispatchVetteBetaPrompt(pi, args, ctx, {

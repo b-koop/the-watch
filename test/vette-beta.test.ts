@@ -162,7 +162,7 @@ describe("vette beta config", () => {
 		expect(localEntry?.timeoutMs).toBe(1_800_000);
 		expect(defaultConfig.vetteBeta.topicThinking).toMatchObject({
 			correctness: "medium",
-			tests: "low",
+			"test-scenarios": "low",
 			"test-mocking": "low",
 			"error-handling": "medium",
 			"security-data": "high",
@@ -175,42 +175,84 @@ describe("vette beta config", () => {
 		});
 	});
 
-	it("reviews changed test files for unnecessary mocking", () => {
-		const mockingTopic = VETTE_BETA_TOPICS.find(
+	it("keeps scenario review focused on missing behavior and edge cases", () => {
+		const scenarioTopic = VETTE_BETA_TOPICS.find(
+			(topic) => topic.id === "test-scenarios",
+		);
+
+		expect(scenarioTopic).toMatchObject({
+			id: "test-scenarios",
+			label: "Test scenarios",
+		});
+		expect(scenarioTopic?.prompt).toContain(
+			"missing regression-catching test scenarios",
+		);
+		expect(scenarioTopic?.prompt).toContain("changed observable behavior");
+		expect(scenarioTopic?.prompt).toContain(
+			"test that would fail if that behavior regressed",
+		);
+		expect(scenarioTopic?.prompt).toContain("missing edge-case scenario");
+		expect(scenarioTopic?.prompt).toContain("missing negative-path scenario");
+		expect(scenarioTopic?.prompt).toContain("missing boundary scenario");
+		expect(scenarioTopic?.prompt).toContain("deleted/disabled test");
+		expect(scenarioTopic?.prompt).toContain("equivalent coverage elsewhere");
+		expect(scenarioTopic?.prompt).toContain("pre-existing scenario gaps");
+		expect(scenarioTopic?.prompt).toContain("follow-up rather than required");
+		expect(scenarioTopic?.prompt).toContain("duplicate tests");
+		expect(scenarioTopic?.prompt).toContain("test quality lane");
+	});
+
+	it("keeps test quality review focused on changed test-file brittleness", () => {
+		const qualityTopic = VETTE_BETA_TOPICS.find(
 			(topic) => topic.id === "test-mocking",
 		);
 
-		expect(mockingTopic).toMatchObject({
+		expect(qualityTopic).toMatchObject({
 			id: "test-mocking",
-			label: "Test mocking",
+			label: "Test quality",
 		});
-		expect(mockingTopic?.prompt).toContain("changed test files only");
-		expect(mockingTopic?.prompt).toContain("unnecessary mocks");
-		expect(mockingTopic?.prompt).toContain(
-			"real implementation or simple fake",
+		expect(qualityTopic?.prompt).toContain("changed test files only");
+		expect(qualityTopic?.prompt).toContain(
+			"test names that do not accurately describe the behavior actually exercised and asserted",
 		);
-		expect(mockingTopic?.prompt).toContain(
-			"expectations/assertions semantically match the code under test",
+		expect(qualityTopic?.prompt).toContain(
+			"dependency works inside an isolated test system",
 		);
-		expect(mockingTopic?.prompt).toContain(
-			"generic truthiness, equality, or snapshot assertions",
+		expect(qualityTopic?.prompt).toContain("real implementation or simple fake");
+		expect(qualityTopic?.prompt).toContain("API calls");
+		expect(qualityTopic?.prompt).toContain("database access");
+		expect(qualityTopic?.prompt).toContain("components/web components");
+		expect(qualityTopic?.prompt).toContain("not renderable in the test environment");
+		expect(qualityTopic?.prompt).toContain(
+			"multiple test cases that assert the same observable outcome",
 		);
-		expect(mockingTopic?.prompt).toContain("domain-specific matcher");
-		expect(mockingTopic?.prompt).toContain("TypeScript tests using jsdom");
-		expect(mockingTopic?.prompt).toContain(
-			".toBeInTheDocument() over .toBeTruthy()",
+		expect(qualityTopic?.prompt).toContain("differing inputs, setup, or edge-case coverage");
+		expect(qualityTopic?.prompt).toContain("beforeEach/describe-level setup");
+		expect(qualityTopic?.prompt).toContain("weak matchers");
+		expect(qualityTopic?.prompt).toContain("generated class names");
+		expect(qualityTopic?.prompt).toContain("volatile values");
+		expect(qualityTopic?.prompt).toContain("full DOM structure");
+		expect(qualityTopic?.prompt).toContain("narrow behavior under test");
+		expect(qualityTopic?.prompt).toContain("domain-specific matcher");
+		expect(qualityTopic?.prompt).toContain(".toBeInTheDocument()");
+		expect(qualityTopic?.prompt).toContain(".not.toBeInTheDocument()");
+		expect(qualityTopic?.prompt).toContain("Question fireEvent");
+		expect(qualityTopic?.prompt).toContain(
+			"userEvent would better model real async interactions",
 		);
-		expect(mockingTopic?.prompt).toContain(".not.toBeInTheDocument()");
-		expect(mockingTopic?.prompt).toContain("question fireEvent usage");
-		expect(mockingTopic?.prompt).toContain(
-			"userEvent would better model real user behavior",
+		expect(qualityTopic?.prompt).toContain(
+			"fireEvent is acceptable for simple synchronous low-level DOM events",
 		);
-		expect(mockingTopic?.prompt).toContain(
-			"async interactions, focus, typing, pointer, or keyboard flows",
+		expect(qualityTopic?.prompt).toContain("time is not frozen first");
+		expect(qualityTopic?.prompt).toContain("timezone/local-time/DST behavior is not pinned");
+		expect(qualityTopic?.prompt).toContain("prefer frozen time");
+		expect(qualityTopic?.prompt).toContain(
+			"harden the chosen timestamps/timezone expectations",
 		);
-		expect(mockingTopic?.prompt).toContain(
-			"network, filesystem, time, randomness, external APIs, or expensive/flaky boundaries",
+		expect(qualityTopic?.prompt).toContain(
+			"network, filesystem, time, randomness, external APIs, expensive/flaky boundaries",
 		);
+		expect(qualityTopic?.prompt).toContain("unrenderable platform components");
 	});
 
 	it("preserves ordered user model pools", () => {
@@ -629,6 +671,54 @@ describe("vette beta fallback runner", () => {
 
 		expect(result.ok).toBe(true);
 		expect(result.attempts[0].timedOut).toBe(true);
+	});
+
+	it("discovers direct OpenAI fallback models before OpenRouter models", async () => {
+		const runner = vi
+			.fn<PiAgentRunner>()
+			.mockResolvedValueOnce({
+				exitCode: 1,
+				stdout: "",
+				stderr: "provider down",
+				messages: [],
+				finalText: "",
+			})
+			.mockResolvedValueOnce(successResult());
+
+		const result = await runTopicWithFallback({
+			topic,
+			bundle: "diff",
+			cwd: "/repo",
+			tools: ["read"],
+			pool: [
+				{
+					index: 0,
+					model: "provider/first",
+					thinking: "off",
+					timeoutMs: 1,
+					availability: "available",
+				},
+			],
+			cooldown: new VetteBetaCooldown({ now: () => 1, cooldownMs: 1000 }),
+			runner,
+			modelRegistry: {
+				getAvailable: () => [
+					{
+						provider: "openrouter",
+						id: "openai/gpt-4o-mini",
+						contextWindow: 8_000,
+					},
+					{ provider: "openai", id: "gpt-4o-mini", contextWindow: 128_000 },
+				],
+			},
+		});
+
+		expect(result.ok).toBe(true);
+		expect(result.finalModel).toBe("openai/gpt-4o-mini");
+		expect(result.attempts.map((attempt) => attempt.model)).toEqual([
+			"provider/first",
+			"openai/gpt-4o-mini",
+		]);
 	});
 
 	it("runs a second model before accepting clean security or async results", async () => {
