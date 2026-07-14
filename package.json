@@ -1,6 +1,6 @@
 {
   "name": "@ai-local/watch",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Pi package that watches pull requests with PR-aware /vette, /pr, and /watch commands plus GitHub status diagnostics.",
   "type": "module",
   "license": "MIT",
@@ -65,6 +65,7 @@
     "test": "pnpm typecheck && vitest run",
     "vitest": "vitest run",
     "prepublishOnly": "pnpm typecheck",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "publish:otc": "pnpm pack:check && npm publish --access public --otp"
   }
 }

@@ -1099,25 +1099,20 @@ describe("vette beta review integration", () => {
 		);
 	});
 
-	it("adds optional Fallow audit triage when requested", async () => {
-		const prompt = formatVetteBetaSynthesisPrompt(
-			{
-				poolName: "light",
-				resolvedPool: [],
-				bundle: "diff",
-				startedAt: "2026-07-02T10:00:00.000Z",
-				finishedAt: "2026-07-02T10:00:03.000Z",
-				durationMs: 3000,
-				reviewMode: "comment",
-				results: [{ topic, attempts: [], ok: true, output: "{}" }],
-				changedPaths: ["extensions/pr-vette.ts"],
-			},
-			{ fallowAudit: true },
-		);
+	it("adds standard Fallow audit triage", async () => {
+		const prompt = formatVetteBetaSynthesisPrompt({
+			poolName: "light",
+			resolvedPool: [],
+			bundle: "diff",
+			startedAt: "2026-07-02T10:00:00.000Z",
+			finishedAt: "2026-07-02T10:00:03.000Z",
+			durationMs: 3000,
+			reviewMode: "comment",
+			results: [{ topic, attempts: [], ok: true, output: "{}" }],
+			changedPaths: ["extensions/pr-vette.ts"],
+		});
 
-		expect(prompt).toContain(
-			"Optional Fallow audit requested (--fallow-audit)",
-		);
+		expect(prompt).toContain("Required Fallow audit leg");
 		expect(prompt).toContain(
 			"pnpx fallow audit --base origin/main --gate new-only",
 		);

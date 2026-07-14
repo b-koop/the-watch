@@ -118,7 +118,7 @@ describe("draftPrPrompt", () => {
 		expect(prompt).toContain("marking PR ready for review");
 	});
 
-	it("includes optional Fallow audit instructions in draft PR vetting", () => {
+	it("includes standard Fallow audit instructions in draft PR vetting", () => {
 		const prompt = draftPrPrompt(
 			{
 				branch: "feature/x",
@@ -128,13 +128,11 @@ describe("draftPrPrompt", () => {
 				remoteUrl: "git@github.com:o/r.git",
 			},
 			"no open PR for branch",
-			"--fallow-audit",
-			{ wantsPosting: false, wantsWatch: true, wantsFallowAudit: true },
+			"",
+			{ wantsPosting: false, wantsWatch: true },
 		);
 
-		expect(prompt).toContain(
-			"Optional Fallow audit requested (--fallow-audit)",
-		);
+		expect(prompt).toContain("Required Fallow audit leg");
 		expect(prompt).toContain(
 			"pnpx fallow audit --base origin/main --gate new-only",
 		);
