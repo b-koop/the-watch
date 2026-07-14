@@ -37,6 +37,11 @@ The parent session deduplicates and verifies findings before acting.
 - Add `--local` or `--force-local` to force topic agents to use local-only
   model selection. Local mode starts with stronger local review models and falls
   back to smaller 7B/8B models when needed.
+- Add `--fallow-audit` (or `--fallow`) to include an optional
+  `pnpx fallow audit --base origin/main --gate new-only` advisory pass during
+  synthesis. Fallow items are deduplicated and must pass the same verification
+  gate before they are fixed, posted, or reported; noisy items are summarized so
+  you can judge whether the audit was useful.
 
 #### `/vette old [pr|branch|url|scope] [--scope] [--post-comments]`
 
@@ -48,12 +53,14 @@ Legacy workflow with three modes:
 | External PR | Someone else's PR | Post verified findings as PR comments |
 | Scope | `--scope` flag or non-PR selector | Write local bug-draft Markdown files |
 
-### `/pr [pr|branch|url] [--post-comments] [--no-watch] [--local]`
+### `/pr [pr|branch|url] [--post-comments] [--no-watch] [--local] [--fallow-audit]`
 
 End-to-end PR workflow: vettes the current branch, creates a PR if needed, then
 watches it. Handles the full lifecycle — merge conflicts, CI failures, review
 feedback, and bot activity — with focused subagents for fixes. Add `--local` or
 `--force-local` to keep all review/repair/investigation agents on local models.
+Add `--fallow-audit` (or `--fallow`) to ask the PR workflow to run and triage
+an advisory Fallow audit before finalizing review/repair decisions.
 
 Shows a live footer status:
 

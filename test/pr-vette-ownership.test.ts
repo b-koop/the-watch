@@ -118,6 +118,29 @@ describe("draftPrPrompt", () => {
 		expect(prompt).toContain("marking PR ready for review");
 	});
 
+	it("includes optional Fallow audit instructions in draft PR vetting", () => {
+		const prompt = draftPrPrompt(
+			{
+				branch: "feature/x",
+				baseBranch: "main",
+				localIdentity: "Dev User <dev@example.com>",
+				dirtyStatus: "",
+				remoteUrl: "git@github.com:o/r.git",
+			},
+			"no open PR for branch",
+			"--fallow-audit",
+			{ wantsPosting: false, wantsWatch: true, wantsFallowAudit: true },
+		);
+
+		expect(prompt).toContain(
+			"Optional Fallow audit requested (--fallow-audit)",
+		);
+		expect(prompt).toContain(
+			"pnpx fallow audit --base origin/main --gate new-only",
+		);
+		expect(prompt).toContain("advisory candidates, not verified findings");
+	});
+
 	it("carries local model mode into draft PR vetting", () => {
 		const prompt = draftPrPrompt(
 			{

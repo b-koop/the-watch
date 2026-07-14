@@ -2238,7 +2238,11 @@ function formatAttempt(attempt: VetteBetaAttempt): string {
 
 export function formatVetteBetaSynthesisPrompt(
 	run: VetteBetaRunResult,
-	options: { noPost?: boolean; localOnly?: boolean } = {},
+	options: {
+		noPost?: boolean;
+		localOnly?: boolean;
+		fallowAudit?: boolean;
+	} = {},
 ): string {
 	const ok = run.results.filter((result) => result.ok).length;
 	const failed = run.results.length - ok;
@@ -2249,6 +2253,7 @@ export function formatVetteBetaSynthesisPrompt(
 	const isDocMode = run.reviewMode === "doc";
 	const noPost = options.noPost === true;
 	const localOnly = options.localOnly === true;
+	const fallowAudit = options.fallowAudit === true;
 	let actionInstruction: string;
 	let modeLabel: string;
 	let toolsHeading = "Available tools for verification and posting:";
@@ -2336,6 +2341,16 @@ export function formatVetteBetaSynthesisPrompt(
 			: []),
 		"",
 		"Continue the full vette workflow from these topic-agent results; do not stop at a summary.",
+		...(fallowAudit
+			? [
+					"",
+					"Optional Fallow audit requested (--fallow-audit):",
+					"- Run `pnpx fallow audit --base origin/main --gate new-only` after reading the topic-agent results and before final synthesis. If origin/main is unavailable, use the reviewed base branch/ref shown in the diff context.",
+					"- Treat Fallow output as advisory candidates, not verified findings. Deduplicate it against topic findings and changed files.",
+					"- For every Fallow item considered useful, verify it with the same evidence gate as other findings before fixing, posting, or reporting it.",
+					"- For noisy, duplicate, pre-existing, or out-of-scope Fallow items, summarize why they were rejected so the run can be evaluated for usefulness.",
+				]
+			: []),
 		"",
 		toolsHeading,
 		shellToolInstruction,

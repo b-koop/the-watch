@@ -218,15 +218,21 @@ describe("vette beta config", () => {
 		expect(qualityTopic?.prompt).toContain(
 			"dependency works inside an isolated test system",
 		);
-		expect(qualityTopic?.prompt).toContain("real implementation or simple fake");
+		expect(qualityTopic?.prompt).toContain(
+			"real implementation or simple fake",
+		);
 		expect(qualityTopic?.prompt).toContain("API calls");
 		expect(qualityTopic?.prompt).toContain("database access");
 		expect(qualityTopic?.prompt).toContain("components/web components");
-		expect(qualityTopic?.prompt).toContain("not renderable in the test environment");
+		expect(qualityTopic?.prompt).toContain(
+			"not renderable in the test environment",
+		);
 		expect(qualityTopic?.prompt).toContain(
 			"multiple test cases that assert the same observable outcome",
 		);
-		expect(qualityTopic?.prompt).toContain("differing inputs, setup, or edge-case coverage");
+		expect(qualityTopic?.prompt).toContain(
+			"differing inputs, setup, or edge-case coverage",
+		);
 		expect(qualityTopic?.prompt).toContain("beforeEach/describe-level setup");
 		expect(qualityTopic?.prompt).toContain("weak matchers");
 		expect(qualityTopic?.prompt).toContain("generated class names");
@@ -244,7 +250,9 @@ describe("vette beta config", () => {
 			"fireEvent is acceptable for simple synchronous low-level DOM events",
 		);
 		expect(qualityTopic?.prompt).toContain("time is not frozen first");
-		expect(qualityTopic?.prompt).toContain("timezone/local-time/DST behavior is not pinned");
+		expect(qualityTopic?.prompt).toContain(
+			"timezone/local-time/DST behavior is not pinned",
+		);
 		expect(qualityTopic?.prompt).toContain("prefer frozen time");
 		expect(qualityTopic?.prompt).toContain(
 			"harden the chosen timestamps/timezone expectations",
@@ -1089,6 +1097,32 @@ describe("vette beta review integration", () => {
 		expect(prompt).toContain(
 			"post verified findings to https://github.com/o/r/pull/123",
 		);
+	});
+
+	it("adds optional Fallow audit triage when requested", async () => {
+		const prompt = formatVetteBetaSynthesisPrompt(
+			{
+				poolName: "light",
+				resolvedPool: [],
+				bundle: "diff",
+				startedAt: "2026-07-02T10:00:00.000Z",
+				finishedAt: "2026-07-02T10:00:03.000Z",
+				durationMs: 3000,
+				reviewMode: "comment",
+				results: [{ topic, attempts: [], ok: true, output: "{}" }],
+				changedPaths: ["extensions/pr-vette.ts"],
+			},
+			{ fallowAudit: true },
+		);
+
+		expect(prompt).toContain(
+			"Optional Fallow audit requested (--fallow-audit)",
+		);
+		expect(prompt).toContain(
+			"pnpx fallow audit --base origin/main --gate new-only",
+		);
+		expect(prompt).toContain("advisory candidates, not verified findings");
+		expect(prompt).toContain("summarize why they were rejected");
 	});
 
 	it("suppresses all posting instructions when --no-post is requested", async () => {
