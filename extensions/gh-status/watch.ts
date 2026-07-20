@@ -559,10 +559,11 @@ async function runWatchTick(
 function scheduleWatch(runtime: WatchRuntime, ctx: WatchTickContext): void {
 	const { state } = runtime;
 	if (state.timer) clearInterval(state.timer);
+	// Keep the timer referenced so `/watch` continues monitoring even when
+	// the startup command's initial sweep is the only active event-loop work.
 	state.timer = setInterval(() => {
 		void runWatchTick(runtime, ctx);
 	}, WATCH_INTERVAL_MS);
-	state.timer.unref?.();
 }
 
 function initializeWatchState(
@@ -666,6 +667,65 @@ async function runWatchNow(
 	return checked;
 }
 
+async function peekWatch(
+	runtime: WatchRuntime,
+	ctx: WatchTickContext,
+	options: WatchOptions = {},
+): Promise<boolean> {
+	const { pi, refreshController, state } = runtime;
+	if (state.inFlight) {
+		notifyWatchUi(ctx, "Watch is already checking now.", "warning");
+		return false;
+	}
+
+	state.inFlight = true;
+	try {
+		const snapshot = await refreshController.refresh(ctx, "command", ctx.signal);
+		state.lastSnapshot = snapshot;
+		if (!isOpen(snapshot)) {
+			notifyWatchUi(ctx, "Peek requires an open PR.", "error");
+			return false;
+		}
+
+		const currentFindings = collectFindings(snapshot, new Set<string>());
+		const status = deriveWatchStatus(currentFindings);
+		appendWatchCheck(pi, {
+			snapshot,
+			trigger: "manual",
+			currentFindings,
+			newFindings: currentFindings,
+			status,
+			notifyOnly: options.notifyOnly ?? false,
+		});
+		if (currentFindings.length === 0) {
+			notifyWatchUi(ctx, "Peek found no blocking PR items.", "info");
+			return true;
+		}
+		if (options.notifyOnly) {
+			notifyWatchUi(
+				ctx,
+				formatWatchNotification(currentFindings, status, true),
+				"warning",
+			);
+			return true;
+		}
+		queueWatchInvestigation({
+			pi,
+			ctx,
+			snapshot,
+			findings: currentFindings,
+			status,
+			forceLocal: options.forceLocal ?? false,
+		});
+		return true;
+	} catch (error) {
+		notifyRefreshFailure(ctx, error);
+		return false;
+	} finally {
+		state.inFlight = false;
+	}
+}
+
 function stopWatch(
 	runtime: Pick<WatchRuntime, "state">,
 	ctx: WatchUiContext,
@@ -704,6 +764,8 @@ export function createWatchController(
 	return {
 		start: (ctx: WatchTickContext, options?: WatchOptions) =>
 			startWatch(runtime, ctx, options),
+		peek: (ctx: WatchTickContext, options?: WatchOptions) =>
+			peekWatch(runtime, ctx, options),
 		runNow: (ctx: WatchTickContext) => runWatchNow(runtime, ctx),
 		stop: (ctx: WatchUiContext, reason?: string) =>
 			stopWatch(runtime, ctx, reason),

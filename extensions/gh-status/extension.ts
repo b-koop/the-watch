@@ -331,6 +331,18 @@ function registerWatchCommand(
 			}
 		},
 	});
+
+	pi.registerCommand("peek", {
+		description:
+			"Check the current PR once and queue investigation agents without starting watch mode.",
+		handler: async (args, ctx) => {
+			const flags = args.trim().split(/\s+/).filter(Boolean);
+			const notifyOnly = flags.includes("--notify-only");
+			const forceLocal =
+				flags.includes("--local") || flags.includes("--force-local");
+			await watchController.peek(ctx, { notifyOnly, forceLocal });
+		},
+	});
 }
 
 function registerGithubTools(

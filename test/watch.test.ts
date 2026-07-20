@@ -129,6 +129,37 @@ describe("deriveWatchStatus", () => {
 });
 
 describe("createWatchController", () => {
+	it("peeks at the current PR once and queues agents without starting watch mode", async () => {
+		const refresh = vi.fn().mockResolvedValue(
+			prSnapshot({
+				checks: [{ name: "ci", bucket: "fail", sha: "abc" }],
+				headSha: "abc",
+			}),
+		);
+		const refreshController = {
+			refresh,
+			getSnapshot: () => prSnapshot(),
+		} as unknown as RefreshController;
+		const pi = fakePi();
+		const ctx = fakeContext();
+		const controller = createWatchController(pi, refreshController);
+		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+
+		expect(await controller.peek(ctx)).toBe(true);
+
+		expect(refresh).toHaveBeenCalledWith(ctx, "command", undefined);
+		expect(pi.sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: "watch-trigger" }),
+			{ triggerTurn: true },
+		);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			"Watch detected 1 new item: blocking - pipeline; investigation queued.",
+			"warning",
+		);
+		expect(controller.status()).toBe("Watch is not running.");
+		expect(setIntervalSpy).not.toHaveBeenCalled();
+	});
+
 	it("shows a clear on indicator when watch starts", async () => {
 		const refresh = vi.fn().mockResolvedValue(prSnapshot());
 		const refreshController = {
@@ -197,6 +228,36 @@ describe("createWatchController", () => {
 
 		// Refresh should be called twice: once on startup (initial sweep) and once on timer
 		expect(refresh).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps the automatic watch timer referenced after startup", async () => {
+		const refresh = vi.fn().mockResolvedValue(prSnapshot());
+		const refreshController = {
+			refresh,
+			getSnapshot: () => prSnapshot(),
+		} as unknown as RefreshController;
+		const pi = fakePi();
+		const ctx = fakeContext();
+		const controller = createWatchController(pi, refreshController);
+		let scheduledTimer:
+			| (ReturnType<typeof setInterval> & { hasRef?: () => boolean })
+			| undefined;
+		const originalSetInterval = globalThis.setInterval;
+		const setIntervalSpy = vi
+			.spyOn(globalThis, "setInterval")
+			.mockImplementation(((...args: Parameters<typeof setInterval>) => {
+				scheduledTimer = originalSetInterval(...args) as typeof scheduledTimer;
+				return scheduledTimer;
+			}) as typeof setInterval);
+
+		try {
+			expect(await controller.start(ctx)).toBe(true);
+
+			expect(setIntervalSpy).toHaveBeenCalledOnce();
+			expect(scheduledTimer?.hasRef?.()).toBe(true);
+		} finally {
+			controller.dispose();
+		}
 	});
 
 	it("disposes the automatic watch timer without using a stale session context", async () => {

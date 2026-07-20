@@ -1,7 +1,7 @@
 # Watch
 
 Pi package that watches pull requests with PR-aware `/vette`, `/pr`, `/watch`,
-and GitHub status commands.
+`/peek`, and GitHub status commands.
 
 ## Install
 
@@ -65,6 +65,13 @@ Shows a live footer status:
 ```
 /pr PR #123 working (1/1) prepare/watch next 14m
 ```
+
+### `/peek [--local] [--notify-only]`
+
+Checks the current branch's open PR once, queues the same investigation agents as
+`/watch` for any current blockers, and exits without starting the 15-minute watch
+loop. Use `--local` or `--force-local` to request local-only investigation turns,
+or `--notify-only` to report blockers without queueing agents.
 
 ### `/watch [start|status|stop|now] [--local]`
 
