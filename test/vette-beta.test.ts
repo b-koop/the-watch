@@ -8,6 +8,7 @@ import {
 	VETTE_BETA_TOPICS,
 	VetteBetaCooldown,
 	VetteBetaDiffError,
+	appendBoundedText,
 	applyChildModelAvailability,
 	buildBehaviorSpecsContext,
 	buildVetteBetaDiffBundle,
@@ -46,6 +47,24 @@ function successResult(
 		finalText: text,
 	};
 }
+
+describe("appendBoundedText", () => {
+	it("keeps only the newest text when appended output exceeds the cap", () => {
+		expect(appendBoundedText("abcdef", "ghij", 6)).toBe("efghij");
+	});
+
+	it("caps a single oversized chunk without concatenating old output", () => {
+		expect(appendBoundedText("old", "0123456789", 4)).toBe("6789");
+	});
+
+	it("keeps the full text at the exact cap boundary", () => {
+		expect(appendBoundedText("old", "new", 6)).toBe("oldnew");
+	});
+
+	it("returns empty text when the cap is zero", () => {
+		expect(appendBoundedText("old", "new", 0)).toBe("");
+	});
+});
 
 function fakeContext(
 	modelRegistry?: unknown,

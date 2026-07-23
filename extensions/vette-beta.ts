@@ -162,6 +162,24 @@ export const DEFAULT_LOCAL_VETTE_MODEL = "ollama/ornith:35b";
 export const DEFAULT_LOCAL_VETTE_MODELS = [...DEFAULT_LOCAL_FALLBACK_SELECTORS];
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
+const MAX_CAPTURED_AGENT_OUTPUT_CHARS = 1_000_000;
+const MAX_PENDING_JSON_LINE_CHARS = 5_000_000;
+
+export function appendBoundedText(
+	existing: string,
+	addition: string,
+	maxChars = MAX_CAPTURED_AGENT_OUTPUT_CHARS,
+): string {
+	if (maxChars <= 0) return "";
+	if (addition.length >= maxChars) return addition.slice(-maxChars);
+	const keepExistingChars = maxChars - addition.length;
+	if (existing.length <= keepExistingChars) return `${existing}${addition}`;
+	return `${existing.slice(-keepExistingChars)}${addition}`;
+}
+
+function appendPendingJsonLine(existing: string, addition: string): string {
+	return appendBoundedText(existing, addition, MAX_PENDING_JSON_LINE_CHARS);
+}
 
 const WATCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "watch.json");
 const TIMINGS_PATH = join(homedir(), ".pi", "agent", "vette-beta-timings.json");
@@ -825,7 +843,7 @@ async function listChildModels(
 		}, 20_000);
 		timer.unref?.();
 		proc.stdout.on("data", (data: Buffer) => {
-			stdout += data.toString();
+			stdout = appendBoundedText(stdout, data.toString());
 		});
 		proc.on("close", (code) => {
 			clearTimeout(timer);
@@ -959,6 +977,7 @@ const spawnPiAgent: PiAgentRunner = (input) =>
 		let timedOut = false;
 		let aborted = false;
 		let buffer = "";
+		let bufferTruncated = false;
 		const messages: LocalMessage[] = [];
 		let errorMessage: string | undefined;
 		let stopReason: string | undefined;
@@ -1003,19 +1022,25 @@ const spawnPiAgent: PiAgentRunner = (input) =>
 
 		proc.stdout.on("data", (data: Buffer) => {
 			const text = data.toString();
-			stdout += text;
-			buffer += text;
+			stdout = appendBoundedText(stdout, text);
+			const nextBuffer = appendPendingJsonLine(buffer, text);
+			if (nextBuffer.length < buffer.length + text.length) bufferTruncated = true;
+			buffer = nextBuffer;
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
+			if (bufferTruncated && lines.length > 0) {
+				lines.shift();
+				bufferTruncated = false;
+			}
 			for (const line of lines) processLine(line);
 		});
 		proc.stderr.on("data", (data: Buffer) => {
-			stderr += data.toString();
+			stderr = appendBoundedText(stderr, data.toString());
 		});
 		proc.on("close", (code) => {
 			clearTimeout(timer);
 			input.signal?.removeEventListener("abort", abort);
-			if (buffer.trim()) processLine(buffer);
+			if (!bufferTruncated && buffer.trim()) processLine(buffer);
 			resolve({
 				exitCode: code ?? 0,
 				stdout,
