@@ -10,9 +10,13 @@ import {
 	VetteBetaCooldown,
 	VetteBetaDiffError,
 	averageTopicDuration,
+	buildVetteCompareConfig,
 	formatResolvedModelPool,
+	formatVetteCompareModels,
 	forceLocalVetteBetaConfig,
 	formatVetteBetaSynthesisPrompt,
+	listVetteCompareLocalModels,
+	listVetteCompareRemoteModels,
 	loadTopicTimings,
 	loadVetteBetaConfig,
 	resolveModelPool,
@@ -21,9 +25,22 @@ import {
 	type VetteBetaReviewTarget,
 } from "./vette-beta.ts";
 import {
+	formatVetteCompareReport,
+	formatVetteCompareSummary,
+	parseVetteCompareArgs,
+	runVetteBetaCompare,
+	vetteCompareArtifactPath,
+	writeVetteCompareArtifact,
+} from "./vette-compare.ts";
+import {
 	formatVetteReviewPrompt,
 	loadVetteReviewSections,
 } from "./vette-review.ts";
+import { discoverReviewers } from "./vette-reviewers.ts";
+import {
+	resolveBaseBranch,
+	type ResolvedBaseBranch,
+} from "./base-branch.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -85,6 +102,7 @@ type PrContext = {
 type DraftPrContext = {
 	branch: string;
 	baseBranch: string;
+	baseRef: string;
 	localIdentity: string;
 	dirtyStatus: string;
 	remoteUrl: string;
@@ -98,6 +116,7 @@ type ScopeVetteContext = {
 	target: string;
 	branch: string;
 	baseBranch: string;
+	baseRef: string;
 	dirtyStatus: string;
 	draftsDir: string;
 	findingsPath: string;
@@ -113,6 +132,7 @@ type VetteBetaStatusContext = {
 	reviewMode: VetteBetaReviewMode;
 	queued: boolean;
 	progress?: string;
+	topicLabels?: string;
 };
 
 type CommandStatus = {
@@ -121,6 +141,7 @@ type CommandStatus = {
 	mode: string;
 	phase: "working" | "queued" | "idle" | "blocked" | "merged";
 	progress: string;
+	topicLabels?: string;
 	nextCheckAt?: number;
 };
 
@@ -157,6 +178,26 @@ function formatModelConnection(selector: string): string {
 	return `connection=${selector.slice(0, slash)} model=${selector.slice(slash + 1)}`;
 }
 
+export function shouldSuppressVetteBetaPosting(args: string): boolean {
+	const flags = new Set(args.trim().split(/\s+/).filter(Boolean));
+	return flags.has("--no-post") || flags.has("--dry-run");
+}
+
+export function resolveVetteReviewMode(input: {
+	targetMode?: VetteBetaReviewMode;
+	isSelfReview?: boolean;
+	isDraftReview?: boolean;
+	commentsOnly?: boolean;
+}): VetteBetaReviewMode {
+	if (input.commentsOnly && input.isSelfReview) {
+		throw new Error("--comments-only cannot be combined with /vette self");
+	}
+	if (input.commentsOnly) return "comment";
+	if (input.isSelfReview) return "repair";
+	if (input.isDraftReview) return "comment";
+	return input.targetMode ?? "comment";
+}
+
 function parseArgs(args: string): {
 	selector: string;
 	scopeTarget: string;
@@ -165,6 +206,7 @@ function parseArgs(args: string): {
 	wantsWatch: boolean;
 	noPost: boolean;
 	forceLocal: boolean;
+	commentsOnly: boolean;
 	raw: string;
 } {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -174,6 +216,7 @@ function parseArgs(args: string): {
 	const wantsScope = flags.has("--scope") || flags.has("--service");
 	const noPost = flags.has("--no-post") || flags.has("--dry-run");
 	const forceLocal = flags.has("--local") || flags.has("--force-local");
+	const commentsOnly = flags.has("--comments-only");
 	return {
 		selector,
 		scopeTarget: positional.join(" ") || (wantsScope ? "." : ""),
@@ -186,8 +229,13 @@ function parseArgs(args: string): {
 		wantsWatch: !flags.has("--no-watch"),
 		noPost,
 		forceLocal,
+		commentsOnly,
 		raw: args.trim(),
 	};
+}
+
+export function parseVetteArgs(args: string): ReturnType<typeof parseArgs> {
+	return parseArgs(args);
 }
 
 async function run(
@@ -251,17 +299,16 @@ async function getCurrentBranch(cwd: string): Promise<string> {
 	return branch;
 }
 
-async function getDefaultBaseBranch(cwd: string): Promise<string> {
-	try {
-		const originHead = await run(
-			"git",
-			["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-			cwd,
-		);
-		return originHead.replace(/^origin\//, "") || "main";
-	} catch {
-		return "main";
-	}
+/**
+ * Where this branch was actually cut from — `origin/dev`/`origin/develop`
+ * before `origin/HEAD`, since a repo that defaults to `main` may still take
+ * feature work onto an integration branch.
+ */
+async function resolveDefaultBase(
+	cwd: string,
+	headRef = "HEAD",
+): Promise<ResolvedBaseBranch> {
+	return resolveBaseBranch((args) => run("git", args, cwd), headRef);
 }
 
 async function getOriginRemoteUrl(cwd: string): Promise<string> {
@@ -273,10 +320,10 @@ async function getOriginRemoteUrl(cwd: string): Promise<string> {
 }
 
 async function resolveDraftPrContext(cwd: string): Promise<DraftPrContext> {
-	const [branch, baseBranch, identity, dirtyStatus, remoteUrl] =
+	const [branch, base, identity, dirtyStatus, remoteUrl] =
 		await Promise.all([
 			getCurrentBranch(cwd),
-			getDefaultBaseBranch(cwd),
+			resolveDefaultBase(cwd),
 			getLocalGitIdentity(cwd),
 			getDirtyStatus(cwd),
 			getOriginRemoteUrl(cwd),
@@ -284,7 +331,8 @@ async function resolveDraftPrContext(cwd: string): Promise<DraftPrContext> {
 
 	return {
 		branch,
-		baseBranch,
+		baseBranch: base.branch,
+		baseRef: base.ref,
 		localIdentity: identity.label,
 		dirtyStatus,
 		remoteUrl,
@@ -319,9 +367,9 @@ async function resolveScopeVetteContext(
 	resolveError: string,
 	cwd: string,
 ): Promise<ScopeVetteContext> {
-	const [branch, baseBranch, dirtyStatus] = await Promise.all([
+	const [branch, base, dirtyStatus] = await Promise.all([
 		getCurrentBranch(cwd),
-		getDefaultBaseBranch(cwd),
+		resolveDefaultBase(cwd),
 		getDirtyStatus(cwd),
 	]);
 	const slug = slugifyBranch(target, "scope");
@@ -329,7 +377,8 @@ async function resolveScopeVetteContext(
 	return {
 		target,
 		branch,
-		baseBranch,
+		baseBranch: base.branch,
+		baseRef: base.ref,
 		dirtyStatus,
 		draftsDir,
 		findingsPath: `${draftsDir}/findings.md`,
@@ -643,12 +692,28 @@ function localModelContract(forceLocal: boolean): string {
 - Do not use remote/cloud model fallbacks unless the user explicitly authorizes leaving local mode.`;
 }
 
-function fallowAuditContract(): string {
+/** The ref a PR actually merges into, or `origin/main` when GitHub is silent. */
+function prBaseRef(pr: GhPullRequest): string {
+	return pr.baseRefName ? `origin/${pr.baseRefName}` : "origin/main";
+}
+
+function fallowAuditContract(baseRef = "origin/main"): string {
 	return `Required Fallow audit leg:
-- Run \`pnpx fallow audit --base origin/main --gate new-only\` after initial code/PR context is gathered and before final synthesis. If origin/main is unavailable, use the PR/review base branch shown in the command context.
+- Run \`pnpx fallow audit --base ${baseRef} --gate new-only\` after initial code/PR context is gathered and before final synthesis. If ${baseRef} is unavailable, use the PR/review base branch shown in the command context.
+- Run the Fallow command once per vette pass. Fallow may exit with status 1 when it successfully found audit items. Treat exit 1 with usable findings/output as a completed audit result, not as a failed run; do not rerun it solely because the exit code is 1 or because advisory findings were reported. Only rerun or mark failed when the command produces no usable output or shows an execution/configuration error.
 - Treat Fallow output as advisory candidates, not verified findings. Deduplicate it against other lanes and changed files.
 - For every Fallow item considered useful, verify it with the same evidence gate as other findings before fixing, posting, or reporting it.
 - For noisy, duplicate, pre-existing, or out-of-scope Fallow items, summarize why they were rejected so this run can evaluate whether the audit leg was useful.`;
+}
+
+function vetteBetaSectionsContract(): string {
+	const sections = VETTE_BETA_TOPICS.map(
+		(topic, index) => `${index + 1}. ${topic.label} (${topic.id})`,
+	).join("\n");
+	return `Current /vette command contract:
+- Use the new /vette beta workflow, not /vette old or ad-hoc legacy lanes.
+- Cover all ${VETTE_BETA_TOPICS.length} /vette sections before synthesis:
+${sections}`;
 }
 
 function parallelSuggestionContract(): string {
@@ -697,6 +762,7 @@ function reviewCommentTestContract(): string {
 - At the end of external-review synthesis, inspect every actionable finding for whether it can be reproduced with a focused unit or regression test.
 - For every actionable finding, especially blockers, make a good-faith attempt to build the smallest temporary validating test or repro command that demonstrates the behavior.
 - For each reproducible finding, build the smallest temporary test that demonstrates the behavior, run the focused test command, and verify it fails for the expected reason on the PR branch.
+- If the focused test command fails after the exact-command retry, run one second dependency install attempt, then run the repository build/rebuild command, then rerun the focused test before preparing or posting any comments.
 - Clean up temporary test files unless the user explicitly asked to commit tests; keep the exact test code and failing command output in the review evidence.
 - Put the relevant test code directly in the associated GitHub review comment body, along with the command that proved it failed as expected, before posting the verified comment.
 - If a verified finding cannot be practically reproduced with a unit/regression test, classify it as untestable and preserve the best available evidence plus the reason no focused failing test is practical.`;
@@ -704,18 +770,21 @@ function reviewCommentTestContract(): string {
 
 function reviewCommentPostingContract(): string {
 	return `Review comment posting contract:
-- Do not post comments while still gathering, testing, or cleaning up evidence. After all verification and cleanup is complete, post the verified items in one posting pass.
+- Do not post comments while still gathering, testing, retry-installing, rebuilding, rerunning checks, or cleaning up evidence. After all verification and cleanup is complete, post the verified items in one posting pass.
 - Every prepared or posted comment must start with exactly one scan label line before any details block or suggestion fence: \`🔴 **Blocker**\`, \`🟡 **Recommended**\`, or \`🔵 **Note**\`. Use Blocker for merge-blocking defects, Recommended for non-blocking fixes the author should strongly consider, and Note for contextual/low-risk observations.
 - Every substantive verified issue comment must put the developer-facing finding in the \`<summary>\`: one plain sentence that says what breaks and why. Do not overload the summary with verification metadata, lane names, counts, model names, or command output.
-- For each test-reproduced verified finding, post the associated review comment at the most precise location available: prefer file + exact diff line; if no reliable line exists, use the file-level location when GitHub supports it; if the file is not a good/valid review-comment target, post it as a general PR comment with the file/line context in the body.
-- For [name-check] test-name or identifier/variable naming suggestions and questions: post each substantive naming suggestion as a review comment anchored to the exact changed line in the diff. Use the minimal naming-suggestion comment style from the template contract: a GitHub \`\`\`suggest block with the full replacement line first, then brief reasoning. Do not attach or reference screenshots, clipboard paths, or local image paths for naming suggestions. These are not bundled into the singular untestable-items comment; they are per-line inline comments even when no repro test applies.
-- Build one singular final PR comment for all verified-but-untestable findings. Start it with a short non-scary sentence that states what kind of risk was found, then put each finding in its own \`<details>\` block with a one-sentence \`<summary>\` that names the broken behavior and why it matters.
-- Post the singular untestable-items comment at the end of the posting pass, after all line/file-specific verified comments have been posted.
+- For each verified finding with a concrete file target, including verified-but-untestable findings, post the associated review comment at the most precise location available: prefer file + exact diff line; if no reliable line exists, use the file-level location when GitHub supports it; if the file is not a good/valid review-comment target, post it as a general PR comment with the file/line context in the body.
+- For [name-check] test-name or identifier/variable naming suggestions and questions: post each substantive naming suggestion as a review comment anchored to the exact changed line in the diff. Use the minimal naming-suggestion comment style from the template contract: a GitHub \`\`\`suggest block with the full replacement line first, then brief reasoning. Do not attach or reference screenshots, clipboard paths, or local image paths for naming suggestions. These are not bundled into grouped untestable-items comments; they are per-line inline comments even when no repro test applies.
+- Build a final grouped PR comment only for verified-but-untestable findings that cannot be anchored to a specific changed file or useful file-level target. Start it with a short non-scary sentence that states what kind of risk was found, then put each finding in its own \`<details>\` block with a one-sentence \`<summary>\` that names the broken behavior and why it matters.
+- Post any grouped untestable-items comment at the end of the posting pass, after all line/file-specific verified comments have been posted.
 - If GitHub rejects a line/file comment location, fall back to the next less-specific location and record that fallback in the final report.`;
 }
 
 export function reviewCommentTemplateContract(): string {
-	return `Review comment templates:
+	return `Review comment templates (shared JSON contract):
+- Synthesis must emit a JSON array; every item requires title, severity (blocker|recommended|note), codeSummary, what, and why. file and line are optional; line is a positive integer and requires file.
+- evidence, testCode, and fixBoundary are optional. Whenever a focused or regression test is created, include its complete source in testCode; never leave test code only in evidence or the final report. Pass the complete array to scripts/post-vette-comments.ts; it validates before posting and renders the fixed section order: severity label, title details block, Code summary, What, Why, optional Evidence, optional Regression test, optional Fix boundary.
+- Naming-only suggest comments remain the explicit exception.
 - Use the templates below for posted comments. Keep headings and labels stable so the PR thread is scannable.
 - Summary text must be one sentence, behavior-first, and plainly explain what was found and why it is a bug. Keep verification details inside the expanded panel.
 - GitHub rendering rule: always leave one blank line after the closing \`</summary>\` tag before hidden Markdown content starts, especially before lists, headings, or fenced code blocks.
@@ -755,13 +824,14 @@ export function reviewCommentTemplateContract(): string {
 <brief reasoning for why the replacement better names the behavior>
 
 - For general PR-comment fallbacks of test-reproduced findings, use the same \`<details>\` template and keep **Location** as the first expanded field with the best available file/line context.
-- For the singular final verified-but-untestable PR comment, use this body:
+- For file/line-level verified-but-untestable findings, post one comment per finding using the verified issue details template without the failing repro test section. Keep **Location** as the first expanded field and include **Why no focused test:** before **Fix boundary:**.
+- For a final grouped verified-but-untestable PR comment covering only items that cannot be anchored to a specific changed file, use this body:
 
 🔴 **Blocker** | 🟡 **Recommended** | 🔵 **Note**
 
 Verified findings without focused repro tests: <one short sentence summarizing the shared risk without overstating severity>.
 
-These items were verified but were not practical to demonstrate with focused unit/regression tests. They are grouped here to keep the PR thread focused.
+These PR-wide items were verified but were not practical to demonstrate with focused unit/regression tests or anchor to a useful changed file. They are grouped here to keep the PR thread focused.
 
 <details>
   <summary><one sentence stating what breaks and why for this finding></summary>
@@ -775,7 +845,8 @@ These items were verified but were not practical to demonstrate with focused uni
 </details>
 
 - Repeat one \`<details>\` block per verified-but-untestable finding.
-- If there are no verified-but-untestable findings, do not post the singular untestable-items comment; record "none" in the final report.`;
+- If every verified-but-untestable finding was posted as a file/line-level comment, do not post a grouped untestable-items comment; record "none" for grouped untestable items in the final report.
+- The shared poster records exact-line, file-level, and general fallback results per comment.`;
 }
 
 function vettePrompt(
@@ -793,7 +864,7 @@ function vettePrompt(
 			? "The user explicitly allowed posting comments, but posting is already automatic for verified external-review findings."
 			: "Post externally visible GitHub review comments automatically for verified external-review findings. Do not ask for additional posting approval after verification passes.";
 	const localModels = localModelContract(options.forceLocal === true);
-	const fallowAudit = fallowAuditContract();
+	const fallowAudit = fallowAuditContract(prBaseRef(ctx.pr));
 	const visibleStatusContract = `Visible status requirements:
 - Maintain an explicit status/todo sequence and update it immediately as phases change:
   1. Resolve PR context
@@ -817,10 +888,10 @@ Use these existing skills/instructions by prompt routing as relevant: vette, pr-
 \n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nFinish with PR URL, fixes made, commits pushed, findings artifact path, exact verification commands/results, and any blockers.\n\nComment policy: owner PR mode must not draft or post PR review comments.`;
 	}
 
-	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\n${localModels ? `${localModels}\n\n` : ""}Mandatory behavior:\n- Local non-merge commit evidence does not show this PR branch is owned here, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason.
+	return `Run /vette external PR review mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /vette args: ${rawArgs || "<none>"}\n\n${visibleStatusContract}\n\n${localModels ? `${localModels}\n\n` : ""}Mandatory behavior:\n- Local non-merge commit evidence does not show this PR branch is owned here, so perform an evidence-backed PR review/comment workflow.\n- Review source branch against base branch using merge-base diff, PR title/body, linked requirements, changed files, contracts, and tests.\n- Run vette risk lanes only for changed behavior; do not expand into a whole-repo audit unless necessary for evidence.\n- Verify every actionable finding locally through static proof, focused command, or a temporary failing test. Clean up temporary artifacts.\n- Before finalizing comments, look for findings that can be reproduced with focused unit/regression tests; build those tests, run them, and verify they fail for the expected reason. If the test command still fails after the exact-command retry, run one second dependency install attempt, then run the repository build/rebuild command, then rerun the focused test before preparing or posting any comments.
 - Prepare GitHub review comments that follow the repo comment contract: exact file/line when available, user impact, local evidence, fix boundary, and suggested tests when appropriate. For every substantive finding, put a one-sentence bug reason in the \`<summary>\` and keep evidence/verification inside the expanded \`<details>\` body. For test-reproducible findings, include the exact failing test code in the associated comment body.
 - After all verification and cleanup is complete, post verified comments in one posting pass. Prefer file/line comments, fall back to file-level comments when line placement is not possible, and fall back to a general PR comment when the file is not a good comment target.
-- Build and post one singular final PR comment for verified-but-untestable findings, including file/line information for every item where possible; each finding must be its own \`<details>\` block with a concise summary.
+- Split verified-but-untestable findings into specific file/line review comments whenever possible, using file-level comments when exact line placement is not reliable, so each affected file can be resolved separately. Build a grouped final PR comment only for verified-but-untestable items that cannot be anchored to a useful changed file; each grouped finding must be its own \`<details>\` block with a concise summary.
 - Post only findings that passed the verification gate; reject or report unverified suggestions without posting them.\n- ${commentPolicy}\n- Do not implement repairs on someone else's PR unless the user explicitly asks after seeing the review.\n\n${fallowAudit}\n\nUse these existing skills/instructions by prompt routing as relevant: pr-review, vette, naming, test-name, and thermo-nuclear-code-quality-review.
 \n${parallelSuggestionContract()}
 \n${findingsArtifactContract(ctx)}\n\n${reviewCommentTestContract()}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\nFinish with review disposition, commands/results, findings artifact path, comments prepared and posted, rejected findings, untestable-items comment URL/status, and cleanup status.`;
@@ -846,13 +917,16 @@ function prPrompt(
 	},
 ): string {
 	const localModels = localModelContract(options.forceLocal === true);
-	const fallowAudit = fallowAuditContract();
-	return `Run /pr preparation, vette, repair, and monitoring mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\n${localModels ? `${localModels}\n\n` : ""}Visible status and timing requirements:\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, progress like "working on (1/1)", and the next check time.\n- On every watch check, inspect the PR lifecycle with \`gh pr view ${ctx.pr.number} --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #${ctx.pr.number} is merged; watch closed".\n- When no actionable issue/comment/check failure is present, state "idle until <time>" instead of spawning agents.\n- When a new actionable issue appears, state "working on (n/total)" and only then spin up the focused code agent for that issue.\n\nObjectives:\n1. Resolve and validate the integration base/target branch. Prefer the PR base branch already shown above; verify it exists remotely before diffing or updating.\n2. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n3. Analyze the current PR title/body against the template and rules. Plan exact updates needed; apply safe title/body fixes when appropriate.\n4. Run the same PR-aware /vette behavior internally:
+	const fallowAudit = fallowAuditContract(prBaseRef(ctx.pr));
+	const vetteSections = vetteBetaSectionsContract();
+	return `Run /pr preparation, vette, repair, and monitoring mode for this pull request.\n\n${prSummary(ctx)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\n${localModels ? `${localModels}\n\n` : ""}Visible status and timing requirements:\n- Check immediately, then use a 15-minute cadence while watching.\n- Before every wait, state the current PR status, what was checked, whether you are working or idle, progress like "working on (1/1)", and the next check time.\n- On every watch check, inspect the PR lifecycle with \`gh pr view ${ctx.pr.number} --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #${ctx.pr.number} is merged; watch closed".\n- When no actionable issue/comment/check failure is present, state "idle until <time>" instead of spawning agents.\n- When a new actionable issue appears, state "working on (n/total)" and only then spin up the focused code agent for that issue.\n\nObjectives:\n1. Resolve and validate the integration base/target branch. Prefer the PR base branch already shown above; verify it exists remotely before diffing or updating.\n2. Inspect repository PR rules and standards: .github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, and target-branch expectations.\n3. Analyze the current PR title/body against the template and rules. Plan exact updates needed; apply safe title/body fixes when appropriate.\n4. Run the current /vette beta workflow internally against this PR diff, covering all 11 sections before synthesis:
+${vetteSections}
    - Owner PR: no comments; find and fix confirmed issues through TDD-focused subagents.
-   - External PR: evidence-backed review comments are posted automatically after all verification is complete. At the end of synthesis, create focused unit/regression repro tests for comment-worthy findings where practical, verify those tests fail for the expected reason, include the exact test code in the templated associated comment body, then post verified items in one pass using file/line comments when possible, file-level comments when line placement is not possible, and general PR comments as the fallback. Build one singular templated final comment for verified-but-untestable items with file/line context whenever possible.
+   - External PR: evidence-backed review comments are posted automatically after all verification is complete. At the end of synthesis, create focused unit/regression repro tests for comment-worthy findings where practical, verify those tests fail for the expected reason, include the exact test code in the templated associated comment body, then post verified items in one pass using file/line comments when possible, file-level comments when line placement is not possible, and general PR comments as the fallback. Split verified-but-untestable items into specific file/line review comments whenever possible; use a grouped final comment only for PR-wide or otherwise unanchorable items.
 ${fallowAudit}
 5. Detect merge conflicts and resolve related conflicts through a focused merge-conflict resolver agent.
-6. Inspect CI with \`gh pr checks\` as the source of truth. For failed checks, classify related/unrelated/uncertain. Treat uncertain as related until proven otherwise.\n7. Fix related failures with focused code/TDD subagents. For unrelated flaky/infrastructure failures, retry once when safe, document evidence, and avoid bloating this PR.\n8. Inspect PR comments, reviews, BugBot/bot alerts, and new commits. Spin up code/fix agents only when a new actionable issue/comment/check failure appears.\n9. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass and report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: pull-request, vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\n${subagentContract()}\n\nSafety rules:
+6. Inspect CI with \`gh pr checks\` as the source of truth. For failed checks, classify related/unrelated/uncertain. Treat uncertain as related until proven otherwise. For each failed pipeline/check command, retry the exact command up to 3 total attempts before declaring it still failing. Stop early on success and record every attempt/outcome.\n7. Fix related failures with focused code/TDD subagents. For unrelated flaky/infrastructure failures, retry the failed command/check up to 3 total attempts when safe, document evidence, and avoid bloating this PR.\n8. Inspect PR comments, reviews, BugBot/bot alerts, and new commits. Spin up code/fix agents only when a new actionable issue/comment/check failure appears.
+9. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass and report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: pull-request, vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${findingsArtifactContract(ctx)}\n\n${reviewCommentPostingContract()}\n\n${reviewCommentTemplateContract()}\n\n${subagentContract()}\n\nSafety rules:
 - Report dirty worktree state before repair actions and protect pre-existing changes.\n- ${options.noPost ? "DRY RUN (--no-post): do not post any GitHub comments or reviews; prepare comment-ready markdown for verified findings and present it in the final report only." : `For external PR review findings, post only verified comments automatically; unverified suggestions must be rejected or reported without posting. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.`}\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n\nFinish with PR URL, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
 
@@ -867,12 +941,15 @@ export function draftPrPrompt(
 	},
 ): string {
 	const localModels = localModelContract(options.forceLocal === true);
-	const fallowAudit = fallowAuditContract();
+	const fallowAudit = fallowAuditContract(ctx.baseRef);
+	const vetteSections = vetteBetaSectionsContract();
 	return `Run /pr draft-first creation, vette, repair, and monitoring mode for this branch. No existing pull request was resolved, so push the branch and open a DRAFT pull request immediately, then vette while the human reviews the draft in parallel.\n\n${draftPrSummary(ctx, resolveError)}\n\nOriginal /pr args: ${rawArgs || "<none>"}\n\n${localModels ? `${localModels}\n\n` : ""}Visible status and timing requirements:\n- First state "working on (1/4): pushing branch and creating draft PR".\n- After the draft PR exists, state "working on (2/4): vetting branch while draft PR is under human review" and share the PR URL so the human can start reviewing right away.\n- After vette/repair and CI verification pass, state "working on (3/4): marking PR ready for review" and run \`gh pr ready <created-pr-number-or-url>\`.\n- Then state "working on (4/4): monitoring PR" and use the created PR URL/number for all PR-aware checks.\n- Check immediately, then use a 15-minute cadence while watching.
 - Before every wait, state the current PR status, what was checked, whether you are working or idle, and the next check time.
-- After the PR exists, every watch check must inspect the PR lifecycle with \`gh pr view <created-pr-number-or-url> --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #<number> is merged; watch closed".\n\nObjectives:\n1. Validate the working branch and base. Use current branch ${ctx.branch} as the PR head. Prefer ${ctx.baseBranch} as the base, but verify the remote base exists and adjust only when repository policy clearly requires a different base.\n2. Protect pre-existing dirty worktree changes. Report them before any push or repair action and avoid overwriting unrelated user changes.\n3. Create the draft PR first so human review and agent checks run in parallel: inspect repository PR rules and standards (.github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, target-branch expectations), prepare a concise title and body that satisfy the template, push the branch, then create the pull request with \`gh pr create --draft\` targeting the validated base. Do not require the user to provide a branch, PR number, or URL. Report the PR URL immediately after creation.\n4. With the draft PR up, run the same owner-side /vette behavior internally against the branch diff from the base: run parallel vette, name-check, and thermo-nuclear lanes; verify every confirmed issue; repair confirmed defects through TDD-focused subagents; run focused verification; and push fixes to the PR branch as they pass so the human always reviews the latest state.
+- After the PR exists, every watch check must inspect the PR lifecycle with \`gh pr view <created-pr-number-or-url> --json state,mergedAt,mergeStateStatus\`. If \`state\` is \`MERGED\` or \`mergedAt\` is present, close down the watch item immediately: do not run more checks, post comments, repair code, or schedule another wait. End with exactly "status: merged — PR #<number> is merged; watch closed".\n\nObjectives:\n1. Validate the working branch and base. Use current branch ${ctx.branch} as the PR head. Prefer ${ctx.baseBranch} as the base, but verify the remote base exists and adjust only when repository policy clearly requires a different base.\n2. Protect pre-existing dirty worktree changes. Report them before any push or repair action and avoid overwriting unrelated user changes.\n3. Create the draft PR first so human review and agent checks run in parallel: inspect repository PR rules and standards (.github/pull_request_template.md, contributing docs, branch policy, conventional title style, required body sections, target-branch expectations), prepare a concise title and body that satisfy the template, push the branch, then create the pull request with \`gh pr create --draft\` targeting the validated base. Do not require the user to provide a branch, PR number, or URL. Report the PR URL immediately after creation.\n4. With the draft PR up, run the current /vette beta workflow internally against the branch diff from the base, covering all 11 sections before synthesis:
+${vetteSections}
+Verify every confirmed issue; repair confirmed defects through TDD-focused subagents; run focused verification; and push fixes to the PR branch as they pass so the human always reviews the latest state.
 ${fallowAudit}
-5. While vetting, also validate title/body/base against the template, inspect merge conflicts, and inspect CI with \`gh pr checks\`; fix related failures with focused TDD/code subagents.
+5. While vetting, also validate title/body/base against the template, inspect merge conflicts, and inspect CI with \`gh pr checks\`; for each failed pipeline/check command, retry the exact command up to 3 total attempts before declaring it still failing, then fix related failures with focused TDD/code subagents.
 6. When vette/repair is complete and CI is green (or only unrelated failures remain, documented with evidence), mark the PR ready for review with \`gh pr ready\`. If vette finds blocking defects that cannot be repaired safely, leave the PR in draft and report the blockers instead.\n7. After marking ready, continue with the normal /pr behavior: monitor comments/reviews/BugBot/bot alerts/new commits, and fix related failures with focused TDD/code subagents.\n8. ${options.wantsWatch ? "Keep watching until the PR is merged, checks are green and actionable comments are resolved, or until blocked by a product/architecture decision. A merged PR is terminal: close the babysit item, report the merged state, and do not schedule another check. The watch cadence is 15 minutes between checks unless a GitHub command returns a live pending state sooner." : "Do not enter a long watch loop because --no-watch was provided; perform one full pass through draft PR creation, vette, and initial validation, then report next steps."}\n\nUse these existing skills/instructions by prompt routing as relevant: vette, pr-review, tdd, babysitting-pull-requests, loop-on-ci, fix-merge-conflicts, naming, test-name, thermo-nuclear-code-quality-review.\n\n${parallelSuggestionContract()}\n\n${draftFindingsArtifactContract(ctx)}\n\n${subagentContract()}\n\nSafety rules:\n- Never force push.\n- Do not bypass hooks or required checks.\n- Do not create durable watch-loop helper scripts; keep monitoring as agent/process discipline.\n- Verified external-review posting rules only apply after a PR exists. Current posting flag: ${options.wantsPosting ? "explicitly allowed but not required" : "not required for verified findings"}.\n\nFinish with PR URL, draft-to-ready transition status, title/body/base validation result, findings artifact path, vette findings or repairs, CI/comment status, commits pushed, exact commands/results, and remaining blockers.`;
 }
 
@@ -887,6 +964,11 @@ async function dispatchVettePrompt(
 	) => void,
 ): Promise<void> {
 	const parsed = parseArgs(args);
+	if (parsed.commentsOnly) {
+		throw new Error(
+			"--comments-only is only supported for a pull-request review; do not combine it with /vette old, --scope, --service, or self mode",
+		);
+	}
 	let vetteCommandContext: VetteCommandContext;
 	try {
 		vetteCommandContext = await resolveVetteCommandContext(parsed, ctx.cwd);
@@ -921,15 +1003,15 @@ async function dispatchVettePrompt(
 		);
 	}
 
-	if (!queued) {
-		pi.sendUserMessage(prompt);
-	} else {
+	if (queued) {
 		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 		ctx.ui.notify("/vette queued as follow-up", "info");
+	} else {
+		pi.sendUserMessage(prompt);
 	}
 }
 
-async function resolveVetteBetaTarget(
+export async function resolveVetteBetaTarget(
 	targetArg: string | undefined,
 	cwd: string,
 ): Promise<VetteBetaReviewTarget | undefined> {
@@ -938,9 +1020,7 @@ async function resolveVetteBetaTarget(
 		const prContext = await resolvePrContext(selector, cwd);
 		return {
 			label: `PR #${prContext.pr.number}`,
-			...(prContext.pr.headRefName
-				? { headRef: prContext.pr.headRefName }
-				: {}),
+			...(prContext.pr.headRefName ? { headRef: prContext.pr.headRefName } : {}),
 			...(prContext.pr.baseRefName
 				? { baseRef: `origin/${prContext.pr.baseRefName}` }
 				: {}),
@@ -963,17 +1043,16 @@ async function resolveVetteBetaTarget(
 			() => false,
 		);
 		if (!branchResolves) {
-			const reason =
-				prError instanceof Error ? prError.message : String(prError);
+			const reason = prError instanceof Error ? prError.message : String(prError);
 			throw new Error(
 				`"${selector}" is neither a resolvable PR nor a known branch (PR lookup: ${reason.trim() || "failed"})`,
 			);
 		}
-		const baseBranch = await getDefaultBaseBranch(cwd);
+		const base = await resolveDefaultBase(cwd, selector);
 		return {
 			label: `branch ${selector}`,
 			headRef: selector,
-			baseRef: `origin/${baseBranch}`,
+			baseRef: base.ref,
 		};
 	}
 }
@@ -988,20 +1067,45 @@ async function dispatchVetteBetaPrompt(
 	},
 ): Promise<void> {
 	const allTokens = args.trim().split(/\s+/).filter(Boolean);
-	const noPost =
-		allTokens.includes("--no-post") || allTokens.includes("--dry-run");
+	const commentsOnly = allTokens.includes("--comments-only");
+	if (
+		commentsOnly &&
+		(allTokens.includes("--scope") || allTokens.includes("--service"))
+	) {
+		throw new Error(
+			"--comments-only cannot be combined with --scope or --service",
+		);
+	}
+	let noPost = shouldSuppressVetteBetaPosting(args);
 	const forceLocal =
 		allTokens.includes("--local") || allTokens.includes("--force-local");
+	const regression = allTokens.includes("--regression");
 	const tokens = allTokens.filter((token) => !token.startsWith("--"));
 	const firstToken = tokens[0]?.toLowerCase();
 	const actionOffset = firstToken === "beta" ? 1 : 0;
 	const modeOrAction = tokens[actionOffset]?.toLowerCase() ?? "now";
+	if (commentsOnly && modeOrAction === "scope") {
+		throw new Error("--comments-only cannot be combined with scope mode");
+	}
 	const isSelfReview = modeOrAction === "self";
-	const isDocReview = modeOrAction === "doc";
+	const isDraftReview = modeOrAction === "doc";
+	const isPostReview = modeOrAction === "post";
+	if (commentsOnly && isSelfReview) {
+		throw new Error("--comments-only cannot be combined with /vette self");
+	}
+	if (isDraftReview) noPost = true;
+	if (
+		isPostReview &&
+		!allTokens.includes("--no-post") &&
+		!allTokens.includes("--dry-run")
+	) {
+		noPost = false;
+	}
 	let action = tokens[actionOffset] ?? "now";
-	if (isSelfReview || isDocReview) {
+	if (isSelfReview || isDraftReview || isPostReview) {
 		action = tokens[actionOffset + 1] ?? "now";
 	}
+	// SAFETY: Extension contexts expose modelRegistry at runtime, but the SDK type omits it.
 	const modelRegistry = (ctx as unknown as { modelRegistry?: unknown })
 		.modelRegistry as
 		| undefined
@@ -1025,6 +1129,10 @@ async function dispatchVetteBetaPrompt(
 		target = isSelfReview
 			? undefined
 			: await resolveVetteBetaTarget(action, ctx.cwd);
+		if (target && regression) target = { ...target, regression: true };
+		if (!target && regression) {
+			target = { label: "current worktree", regression: true };
+		}
 	} catch (error) {
 		ctx.ui.notify(
 			`/vette aborted: ${error instanceof Error ? error.message : String(error)}`,
@@ -1032,12 +1140,12 @@ async function dispatchVetteBetaPrompt(
 		);
 		return;
 	}
-	let reviewMode: VetteBetaReviewMode = target?.reviewMode ?? "comment";
-	if (isSelfReview) {
-		reviewMode = "repair";
-	} else if (isDocReview) {
-		reviewMode = "doc";
-	}
+	const reviewMode = resolveVetteReviewMode({
+		targetMode: target?.reviewMode,
+		isSelfReview,
+		isDraftReview,
+		commentsOnly,
+	});
 	const resolvedPool = resolveModelPool({
 		config,
 		modelRegistry,
@@ -1060,11 +1168,13 @@ async function dispatchVetteBetaPrompt(
 	const targetLabel =
 		target?.label ??
 		(isSelfReview ? "current branch self-review" : "current worktree");
+	const topicLabels = VETTE_BETA_TOPICS.map((topic) => topic.label).join(", ");
 	const queued = !ctx.isIdle();
 	options.onStatus?.({
 		targetLabel,
 		reviewMode,
 		queued,
+		topicLabels,
 	});
 
 	const localVetteNotice = isLocalVette
@@ -1073,7 +1183,7 @@ async function dispatchVetteBetaPrompt(
 			? " [mixed pool — includes local model(s)]"
 			: "";
 	ctx.ui.notify(
-		`/vette: building diff bundle for ${targetLabel}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}${localVetteNotice}`,
+		`/vette: building diff bundle for ${targetLabel}; launching lightweight topic agents with ${modelSummary}; mode=${reviewMode}; topics=${topicLabels}${regression ? " [REGRESSION / no-regressions]" : ""}${localVetteNotice}`,
 		"info",
 	);
 
@@ -1245,6 +1355,7 @@ async function dispatchVetteBetaPrompt(
 					reviewMode,
 					queued: false,
 					progress: `${info.completed}/${info.total}`,
+					topicLabels,
 				});
 			},
 		});
@@ -1266,6 +1377,7 @@ async function dispatchVetteBetaPrompt(
 		reviewMode,
 		queued: false,
 		progress: `${result.results.length}/${VETTE_BETA_TOPICS.length}`,
+		topicLabels,
 	});
 
 	if (result.aborted || ctx.signal?.aborted) {
@@ -1292,6 +1404,7 @@ async function dispatchVetteBetaPrompt(
 	const synthesisPrompt = formatVetteBetaSynthesisPrompt(result, {
 		noPost,
 		localOnly: forceLocal,
+		commentsOnly,
 	});
 
 	let totalIn = 0;
@@ -1313,7 +1426,7 @@ async function dispatchVetteBetaPrompt(
 			icon: state.status === "done" ? "\u2713" : "\u2717",
 			label: state.label,
 			findings: state.findings > 0 ? String(state.findings) : "-",
-			duration: state.durationMs !== undefined ? fmtMs(state.durationMs) : "-",
+			duration: state.durationMs === undefined ? "-" : fmtMs(state.durationMs),
 			tokens: fmtTokens(state.inputTokens, state.outputTokens) || "-",
 			model: state.model ?? "-",
 		});
@@ -1346,10 +1459,10 @@ async function dispatchVetteBetaPrompt(
 	);
 	ctx.ui.notify(summaryLines.join("\n"), "info");
 	// Recompute idle state now: the agent may have gone idle (or busy) while topics ran.
-	if (!ctx.isIdle()) {
-		pi.sendUserMessage(synthesisPrompt, { deliverAs: "followUp" });
-	} else {
+	if (ctx.isIdle()) {
 		pi.sendUserMessage(synthesisPrompt);
+	} else {
+		pi.sendUserMessage(synthesisPrompt, { deliverAs: "followUp" });
 	}
 }
 
@@ -1417,11 +1530,11 @@ async function dispatchPrPrompt(
 		);
 	}
 
-	if (!queued) {
-		pi.sendUserMessage(prompt);
-	} else {
+	if (queued) {
 		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 		ctx.ui.notify("/pr queued as follow-up", "info");
+	} else {
+		pi.sendUserMessage(prompt);
 	}
 }
 
@@ -1476,10 +1589,11 @@ function renderStatus(status: CommandStatus): string {
 		return `/${status.command} ${status.target} merged`;
 	const base = `/${status.command} ${status.target} ${status.phase} (${status.progress})`;
 	const mode = ` ${status.mode}`;
+	const topics = status.topicLabels ? ` topics ${status.topicLabels}` : "";
 	const next = status.nextCheckAt
 		? ` next ${formatCountdown(status.nextCheckAt)}`
 		: "";
-	return `${base}${mode}${next}`;
+	return `${base}${mode}${topics}${next}`;
 }
 
 export function buildVetteBetaCommandStatus(
@@ -1497,6 +1611,9 @@ export function buildVetteBetaCommandStatus(
 		mode,
 		phase: statusContext.queued ? "queued" : "working",
 		progress: statusContext.progress ?? `0/${VETTE_BETA_TOPICS.length}`,
+		topicLabels:
+			statusContext.topicLabels ??
+			VETTE_BETA_TOPICS.map((topic) => topic.label).join(", "),
 	};
 }
 
@@ -1580,6 +1697,141 @@ async function dispatchVetteReviewPrompt(
 	});
 	ctx.ui.notify(
 		`/vette review queued ${sections.length} artifact section${sections.length === 1 ? "" : "s"} for outcome analysis.`,
+		"info",
+	);
+}
+
+async function currentBranchSlug(cwd: string): Promise<string> {
+	try {
+		const { stdout } = await execFileAsync(
+			"git",
+			["rev-parse", "--abbrev-ref", "HEAD"],
+			{ cwd },
+		);
+		return slugifyBranch(stdout.trim(), "worktree");
+	} catch {
+		return "worktree";
+	}
+}
+
+async function dispatchVetteComparePrompt(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+	options: { cooldown: VetteBetaCooldown },
+): Promise<void> {
+	let parsed: ReturnType<typeof parseVetteCompareArgs>;
+	try {
+		parsed = parseVetteCompareArgs(args);
+	} catch (error) {
+		ctx.ui.notify(
+			`/vette compare: ${error instanceof Error ? error.message : String(error)}`,
+			"error",
+		);
+		return;
+	}
+
+	// SAFETY: Extension contexts expose modelRegistry at runtime, but the SDK type omits it.
+	const modelRegistry = (ctx as unknown as { modelRegistry?: unknown })
+		.modelRegistry as undefined | Parameters<typeof buildVetteCompareConfig>[1];
+	const baseConfig = await loadVetteBetaConfig();
+
+	if (parsed.listModels) {
+		const defaults = buildVetteCompareConfig(baseConfig, modelRegistry);
+		ctx.ui.notify(
+			formatVetteCompareModels({
+				remote: listVetteCompareRemoteModels(baseConfig),
+				local: listVetteCompareLocalModels(modelRegistry),
+				defaults: {
+					remote: defaults.remoteModel,
+					local: defaults.localModel,
+				},
+			}),
+			"info",
+		);
+		return;
+	}
+
+	let comparePools: ReturnType<typeof buildVetteCompareConfig>;
+	try {
+		comparePools = buildVetteCompareConfig(baseConfig, modelRegistry, {
+			...(parsed.remoteModel ? { remoteModel: parsed.remoteModel } : {}),
+			...(parsed.localModel ? { localModel: parsed.localModel } : {}),
+		});
+	} catch (error) {
+		ctx.ui.notify(
+			`/vette compare: ${error instanceof Error ? error.message : String(error)}`,
+			"error",
+		);
+		return;
+	}
+
+	let target: VetteBetaReviewTarget | undefined;
+	try {
+		target = await resolveVetteBetaTarget(parsed.targetArg, ctx.cwd);
+	} catch (error) {
+		ctx.ui.notify(
+			`/vette compare aborted: ${error instanceof Error ? error.message : String(error)}`,
+			"error",
+		);
+		return;
+	}
+
+	const targetLabel =
+		target?.label ??
+		(parsed.targetArg ? `branch ${parsed.targetArg}` : "current worktree");
+	const topicCount = parsed.topics?.length ?? VETTE_BETA_TOPICS.length;
+	ctx.ui.notify(
+		`/vette compare: ${targetLabel}; remote=${comparePools.remoteModel}; local=${comparePools.localModel}; topics=${topicCount}`,
+		"info",
+	);
+
+	let currentLeg: "remote" | "local" | undefined;
+	let result: Awaited<ReturnType<typeof runVetteBetaCompare>> | undefined;
+	try {
+		result = await runVetteBetaCompare({
+			ctx,
+			pi,
+			config: comparePools.config,
+			cooldown: options.cooldown,
+			remotePoolName: comparePools.remotePoolName,
+			localPoolName: comparePools.localPoolName,
+			remoteModel: comparePools.remoteModel,
+			localModel: comparePools.localModel,
+			targetLabel,
+			...(target ? { target } : {}),
+			...(parsed.topics ? { topics: parsed.topics } : {}),
+			onLegStart: (leg) => {
+				currentLeg = leg;
+				ctx.ui.notify(
+					`/vette compare: running ${leg} leg (${leg === "remote" ? comparePools.remoteModel : comparePools.localModel})`,
+					"info",
+				);
+			},
+		});
+	} catch (error) {
+		if (error instanceof VetteBetaDiffError) {
+			ctx.ui.notify(`/vette compare aborted: ${error.message}`, "error");
+			return;
+		}
+		if (currentLeg) {
+			ctx.ui.notify(
+				`/vette compare failed during ${currentLeg} leg: ${error instanceof Error ? error.message : String(error)}`,
+				"error",
+			);
+			return;
+		}
+		throw error;
+	}
+
+	const branchSlug = target?.headRef
+		? slugifyBranch(target.headRef, "compare")
+		: await currentBranchSlug(ctx.cwd);
+	const artifactPath = vetteCompareArtifactPath(branchSlug);
+	const report = formatVetteCompareReport(result);
+	await writeVetteCompareArtifact(artifactPath, report);
+	ctx.ui.notify(
+		`${formatVetteCompareSummary(result)}\nArtifact: ${artifactPath}`,
 		"info",
 	);
 }
@@ -1715,7 +1967,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("vette", {
 		description:
-			"Run lightweight beta diff agents by default. Use /vette old for the legacy PR/scope workflow or /vette review to analyze saved review artifacts.",
+			"Review a diff and automatically post only verified file/line comments by default. Use --no-post for local comment-ready output, --regression for no-regression review of large changes (chunked by file/subsystem), /vette compare for model comparison, /vette old for the legacy workflow, or /vette review to analyze saved review artifacts.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const preCheck = checkExtensionUpdated(extensionLoadMtimes);
 			if (preCheck.updated) {
@@ -1737,14 +1989,42 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
+			if (subcommand === "reviewers") {
+				const catalog = await discoverReviewers(ctx.cwd);
+				const lines = [
+					`Discovered reviewers: ${catalog.discovered.length}`,
+					`Selected for current worktree: ${catalog.selected.length}`,
+					...catalog.discovered.map((reviewer) => {
+						const selected = catalog.selected.find(
+							(item) => item.name === reviewer.name,
+						);
+						return `- ${reviewer.name} [${reviewer.source === "builtin" ? "builtin" : reviewer.source}] priority=${reviewer.priority} ${selected ? `MATCH (${selected.matchReason})` : "SKIP"}`;
+					}),
+					...catalog.diagnostics.map(
+						(diagnostic) => `! ${diagnostic.sourcePath}: ${diagnostic.message}`,
+					),
+				];
+				ctx.ui.notify(
+					lines.join("\n"),
+					catalog.diagnostics.some((item) => item.severity === "error")
+						? "warning"
+						: "info",
+				);
+				return;
+			}
 			if (subcommand === "review") {
 				await dispatchVetteReviewPrompt(pi, tokens.slice(1).join(" "), ctx);
 				return;
 			}
+			if (subcommand === "compare") {
+				await dispatchVetteComparePrompt(pi, tokens.slice(1).join(" "), ctx, {
+					cooldown: vetteBetaCooldown,
+				});
+				return;
+			}
 			await dispatchVetteBetaPrompt(pi, args, ctx, {
 				cooldown: vetteBetaCooldown,
-				onStatus: (statusContext) =>
-					setVetteBetaCommandStatus(ctx, statusContext),
+				onStatus: (statusContext) => setVetteBetaCommandStatus(ctx, statusContext),
 			});
 
 			const postCheck = checkExtensionUpdated(extensionLoadMtimes);
@@ -1761,12 +2041,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Vette the current branch, create a pull request when needed, then monitor it until merged, green, or blocked.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			await dispatchPrPrompt(
-				pi,
-				args,
-				ctx,
-				(prCommandContext, parsed, options) =>
-					setPrCommandStatus(ctx, prCommandContext, parsed, options),
+			await dispatchPrPrompt(pi, args, ctx, (prCommandContext, parsed, options) =>
+				setPrCommandStatus(ctx, prCommandContext, parsed, options),
 			);
 		},
 	});

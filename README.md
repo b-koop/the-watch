@@ -1,9 +1,16 @@
 # Watch
 
-Pi package that watches pull requests with PR-aware `/vette`, `/pr`, `/watch`,
-`/peek`, and GitHub status commands.
+Watches pull requests with PR-aware `/vette`, `/pr`, `/watch`, `/peek`, and
+GitHub status commands.
+
+`/vette` runs on **two runtimes** from one codebase. Both read the same reviewer
+definitions in `extensions/reviewers/`, build the same diff bundle, and post
+through the same validated comment boundary. Only the fan-out differs: pi spawns
+subprocess agents, Claude Code uses the Workflow tool.
 
 ## Install
+
+### pi
 
 ```bash
 pi install npm:@ai-local/watch
@@ -15,6 +22,128 @@ Or for local development:
 pi -e .
 ```
 
+### Claude Code
+
+This repository is also a Claude Code plugin. The simplest install is to symlink
+the checkout into your skills directory, where it auto-loads as a plugin:
+
+```bash
+ln -s "$(pwd)" ~/.claude/skills/watch
+```
+
+Confirm it loaded (a new session is needed to pick it up):
+
+```bash
+claude plugin list      # → watch@skills-dir ... Status: ✔ loaded
+claude plugin details watch
+```
+
+Then, from any repository:
+
+```
+/watch:vette 123
+```
+
+**Use the namespaced form.** A differently-scoped `vette` skill is common in
+personal skill sets, so bare `/vette` may resolve to that one instead. Both are
+registered, so the prefix is what disambiguates. Inside this repository the
+`.claude/` symlinks also make plain `/vette` resolve here during development.
+
+The plugin registers two entries: the `watch:vette` skill (the entry point) and
+the `watch:vette-lanes` workflow it calls. `/vette` instructs the model to call
+`Workflow`, which satisfies that tool's opt-in requirement — no extra flag
+needed.
+
+Scripts resolve through `${CLAUDE_PLUGIN_ROOT}` so they run from any repository,
+reading that repo's git state rather than the plugin's. Note that the symlink
+install relies on the checkout's own `node_modules` — a bare `npm install` of the
+published package would also need the `smart-model-run` dependency resolvable.
+
+Requirements: Node 18+ (24 recommended), `gh` authenticated, and the `Workflow`
+tool available.
+
+## Publish to npm
+
+Publishing is automatic for pushes to `main` through
+`.github/workflows/publish.yml`. The workflow installs dependencies, runs the
+tests and package dry-run check, and reads the package name and version from
+`package.json`. It queries npm for that exact version first; if it is already
+published, the workflow skips publishing, tagging, and releasing.
+
+For a new version, the workflow uses npm trusted publishing (OIDC) with
+`npm publish --provenance --access public`, then creates and pushes an annotated
+`vX.Y.Z` tag from the triggering commit and publishes a GitHub Release with
+generated notes. The workflow's `npm-publish` environment and the npm trusted
+publisher must be configured for this repository and
+`.github/workflows/publish.yml` in npm. The package version in `package.json` is
+the single source for both the npm version and the generated release tag.
+
+The local `publish:otc` script remains available only as a manual OTP fallback:
+
+```bash
+pnpm publish:otc -- patch 123456
+```
+
+## Headless GitHub comment workflow
+
+Two reusable examples ship here: `.github/workflows/vette-comments.yml` (pi) and
+`.github/workflows/vette-claude.yml` (Claude Code). Both hold to the same
+comment-only contract described below.
+
+### Claude Code
+
+`vette-claude.yml` uses `anthropics/claude-code-action@v1` and needs only
+`ANTHROPIC_API_KEY`. It enforces comment-only at the harness level rather than
+only in the prompt:
+
+```yaml
+claude_args: >-
+  --allowedTools "Read,Grep,Glob,Bash,Workflow"
+  --permission-mode dontAsk
+```
+
+`Edit` and `Write` are withheld, so an unattended run cannot modify the tree even
+if the prompt contract were ignored. A prompt-level contract alone is the weaker
+guarantee.
+
+### pi
+
+`vette-comments.yml` runs on opened, synchronized, and reopened pull requests, checks out the full PR history, and posts only ordinary inline or general comments for verified findings.
+
+Setup:
+
+1. Add the provider credential needed by the selected model to the CI secret store (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`). Never pass credentials as command-line arguments.
+2. Set the non-secret repository variable `VETTE_MODEL` to a `provider/model` selector.
+3. Keep the workflow permissions at `contents: read` and `pull-requests: write`. The workflow uses `pull_request`, not `pull_request_target`; fork PRs without secrets are skipped.
+
+The runner invokes the existing extension with `/vette <pr> --comments-only --post-comments --no-watch`. Comment-only mode is an explicit safety contract: automation never edits files, creates tests, repairs code, commits, pushes, approves, denies, requests changes, or submits a review decision. A clean review is successful and does not fail the PR; configuration, review, or posting failures do.
+
+For local validation without posting:
+
+```bash
+VETTE_MODEL=provider/model node --experimental-strip-types scripts/vette-review.ts --pr 123
+# Validate and render a JSON payload without any network calls:
+pnpm post-vette-comments --dry-run --json '[{"title":"Behavior-first issue","severity":"recommended","file":"src/example.ts","line":42,"codeSummary":"Changed branch skips validation.","what":"Invalid input reaches the write path.","why":"Users can persist inconsistent data."}]'
+# Read JSON from a file or stdin when posting/validating:
+pnpm post-vette-comments --pr 123 --file comments.json
+cat comments.json | pnpm post-vette-comments --pr 123 --stdin
+# For a dry run, invoke the extension directly:
+pi -e ./extensions/pr-vette.ts -p "/vette 123 --comments-only --no-post --no-watch"
+```
+
+The accepted comment payload is a JSON array. Each item requires `title`,
+`severity` (`blocker`, `recommended`, or `note`), `codeSummary`, `what`, and
+`why`; `file` and positive-integer `line` are optional, as are `evidence` and
+`fixBoundary`. The shared renderer emits the stable severity label, title
+`details` block, and `## Code summary`, `## What`, `## Why`, plus optional
+`## Evidence` and `## Fix boundary` sections. The complete array is validated
+before the first post. Invalid JSON never makes a network call; valid comments
+fall back from exact line to file-level to general PR comments and report each
+fallback. The workflow posts ordinary comments only and never submits review
+decisions, edits source, commits, or pushes.
+
+Provider credentials remain environment variables supplied by the shell or CI secret store and are never included in process arguments or diagnostic output.
+
 ## Commands
 
 ### `/vette [pr|branch|url]`
@@ -25,19 +154,42 @@ contracts, async/state, naming, maintainability, requirements, and feature
 behavior specs.
 The parent session deduplicates and verifies findings before acting.
 
-- **External PRs** — posts verified review comments to the PR.
+- **Model tiers** — lane agents never inherit the session model. The
+  pattern-matching lanes (naming, test quality, test scenarios,
+  maintainability) run on Haiku; every other lane, the adversarial verifiers,
+  and the synthesis call run on Sonnet. Nothing is on an Opus tier by default —
+  verification, not lane firepower, is what keeps wrong findings out. Pass
+  `--model haiku|sonnet|opus|fable` to `vette-prepare` to override all three.
+- **Base branch** — a PR is reviewed against its own base. Without a PR, the
+  base is the branch the head was actually cut from: `origin/dev`,
+  `origin/develop`, and `origin/development` are checked first, then whatever
+  `origin/HEAD` advertises, then `origin/main`/`master`/`trunk`, and the
+  candidate with the fewest commits between its merge base and your head wins.
+  That keeps a repo which defaults to `main` but integrates on `dev` from
+  dragging the whole integration branch into the diff.
+- **External PRs** — automatically posts only verified review comments, using
+  changed file/line locations whenever available.
+- **`--no-post`** (or `--dry-run`) — keeps verified comments local and
+  comment-ready instead of posting them.
+- **`/vette post [pr|branch|url]`** and **`--post-comments`** remain accepted
+  aliases for automatic posting.
 - **Owned PRs / `/vette self`** — repair mode. Fixes confirmed issues directly
   in your working tree instead of posting comments.
-- **`/vette doc [pr|branch|url]`** — local findings mode. Outputs findings and
-  action items locally only; it does not post PR comments, create TDD repro
-  tests, or repair code.
+- **`/vette doc [pr|branch|url]`** — legacy alias for the same comment-ready,
+  no-post review mode; it no longer runs the old local-doc-only workflow.
 - **`/vette review [--limit N]`** — mines saved review artifacts and summarizes
   which recommendations were accepted, rejected, fixed differently, or missed.
+- **`/vette compare [pr|branch|url] [--topics id1,id2] [--model remote] [--local local]`** — runs the same diff
+  through a remote small model and a local ~7B model, then writes a comparison
+  report to `/tmp/pi-vette-findings/<branch>/model-compare.md` with overlap,
+  remote-only, and local-only findings. Use `/vette compare models` to list
+  available remote/local selectors and defaults.
+- `/vette reviewers` — lists discovered built-in and repository-local reviewer definitions, selectors, sources, and current-worktree matches.
 - `/vette models` — shows selected providers and model IDs.
 - Add `--local` or `--force-local` to force topic agents to use local-only
   model selection. Local mode starts with stronger local review models and falls
   back to smaller 7B/8B models when needed.
-- Runs `pnpx fallow audit --base origin/main --gate new-only` as a standard
+- Runs `pnpx fallow audit --base <resolved base> --gate new-only` as a standard
   advisory leg during synthesis. Fallow items are deduplicated and must pass the
   same verification gate before they are fixed, posted, or reported; noisy items
   are summarized so you can judge whether the audit was useful.
@@ -62,7 +214,7 @@ review/repair/investigation agents on local models.
 
 Shows a live footer status:
 
-```
+```text
 /pr PR #123 working (1/1) prepare/watch next 14m
 ```
 
@@ -73,9 +225,9 @@ Checks the current branch's open PR once, queues the same investigation agents a
 loop. Use `--local` or `--force-local` to request local-only investigation turns,
 or `--notify-only` to report blockers without queueing agents.
 
-### `/watch [start|status|stop|now] [--local]`
+### `/watch [start|status|stop|now] [--local] [--model=<provider/model>]`
 
-Monitors the current branch's open PR for blocking issues on a timer.
+Monitors the current branch's open PR for blocking issues on a timer and stays active until the PR is merged or closed (or the user explicitly stops it).
 
 | Subcommand | Action |
 | --- | --- |
@@ -88,13 +240,16 @@ The watch function pings the PR approximately every 15 minutes to detect new
 comments, changes, or pending issues (e.g., merge conflicts, failed checks,
 BugBot activity, or review feedback).  It only triggers additional LLM
 tasks when new data is detected, so it stays lightweight when the PR is
-quiet.  Use `--local` or `--force-local` to restrict all intelligence to
-local models during investigation turns.
+quiet.  A clean check is not terminal: watch continues until the PR is merged
+or closed. Use `--local` or `--force-local` to restrict all intelligence to local
+models during investigation turns.
 
 Detects merge conflicts, failed checks, human comments/reviews, and BugBot
 activity. Prioritizes by severity and routes findings to the agent with
 fix instructions.  Add `--local` or `--force-local` to request local-only
-model use for queued investigation turns.
+model use for queued investigation turns. Add `--model=<provider/model>` to
+select a configured model for watch investigations, for example
+`--model=codex/gpt-5.6-luna`.
 
 #### Review learning capture
 
@@ -164,6 +319,28 @@ Models are tried in array order with automatic fallback on failure. Default
 timeout is 3 minutes (30 minutes for `ollama/*`, `lmstudio/*`, `local/*`).
 
 Per-topic thinking levels are also configurable via `vetteBeta.topicThinking`.
+
+### Reviewer definitions
+
+Reviewers are Markdown files. The package ships built-in definitions under
+`extensions/reviewers/<name>/REVIEW.md`; projects may add or override them with
+`.reviewers/<name>/REVIEW.md`. Local definitions replace a built-in reviewer with
+the same normalized `name`, and `enabled: false` disables that reviewer.
+
+Frontmatter supports `name` and `description` plus optional `version`, `priority`,
+`paths`, `languages`, `frameworks`, `changeTypes`, `exclude`, `selector`,
+`enabled`, and argv hook arrays `pre`/`post`. Positive selector categories are
+ANDed; values within one category are ORed. Paths are repository-relative globs.
+A reviewer runs only when a changed file matches its positive scope and is not
+excluded. Priority orders execution, with stable name ordering for ties.
+
+The Markdown body is the reviewer prompt and is treated as untrusted repository
+content. Hooks are declared argv arrays, never router-generated shell strings;
+unknown fields and malformed definitions produce diagnostics and are skipped.
+The lightweight router receives only metadata and the changed-file summary. Its
+plan is validated against the registry; invalid JSON, invented names, duplicate
+entries, or invalid commands fall back to deterministic registry selection.
+Use `/vette reviewers` to inspect discovery without running hooks or agents.
 
 ## Requirements
 

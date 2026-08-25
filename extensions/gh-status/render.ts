@@ -46,12 +46,20 @@ export function renderPrStatus(pr: PullRequestStatus): string {
 	const otherBotCount = pr.activities.filter(
 		(activity) => activity.isBot && activity.botKind !== "cursor-bugbot",
 	).length;
+	const state = pr.state?.toUpperCase();
+	const mergeState = pr.mergeStateStatus?.toUpperCase();
 	const checkText =
-		checks.failed > 0
-			? `✗ ${checks.failed} failing`
-			: checks.pending > 0
-				? `… ${checks.pending} pending`
-				: "✓ checks";
+		state === "MERGED"
+			? "✓ merged"
+			: mergeState === "QUEUED" ||
+					mergeState === "IN_QUEUE" ||
+					mergeState === "MERGE_QUEUE"
+				? "… merge queue"
+				: checks.failed > 0
+					? `✗ ${checks.failed} failing`
+					: checks.pending > 0
+						? `… ${checks.pending} pending`
+						: "✓ checks";
 	const activityText = [
 		`${humanCount} human`,
 		bugBotCount > 0 ? `BugBot ${bugBotCount}` : undefined,

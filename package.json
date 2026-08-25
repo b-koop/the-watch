@@ -1,6 +1,6 @@
 {
   "name": "@ai-local/watch",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "Pi package that watches pull requests with PR-aware /vette, /pr, /watch, and /peek commands plus GitHub status diagnostics.",
   "type": "module",
   "license": "MIT",
@@ -22,7 +22,9 @@
     "code-review",
     "github",
     "vette",
-    "watch"
+    "watch",
+    "claude-code",
+    "claude-code-plugin"
   ],
   "engines": {
     "node": ">=18.0.0"
@@ -32,7 +34,11 @@
   },
   "files": [
     "extensions/",
-    "README.md"
+    "scripts/",
+    "README.md",
+    "skills/",
+    "workflows/",
+    ".claude-plugin/"
   ],
   "pi": {
     "extensions": [
@@ -41,7 +47,7 @@
     ]
   },
   "dependencies": {
-    "smart-model-run": "0.2.0"
+    "smart-model-run": "^0.2.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -62,10 +68,16 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "pnpm lint:console",
+    "lint:console": "node scripts/lint-no-console.mjs",
     "test": "pnpm typecheck && vitest run",
     "vitest": "vitest run",
+    "vette:review": "node --experimental-strip-types scripts/vette-review.ts",
+    "post-vette-comments": "node --experimental-strip-types scripts/post-vette-comments.ts",
     "prepublishOnly": "pnpm typecheck",
     "pack:check": "npm pack --dry-run",
-    "publish:otc": "pnpm pack:check && npm publish --access public --otp"
+    "publish:ci": "npm publish --provenance --access public",
+    "publish:otc": "./scripts/publish-npm.sh",
+    "vette:prepare": "node --experimental-strip-types scripts/vette-prepare.ts"
   }
 }

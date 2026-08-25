@@ -10,6 +10,11 @@ import {
 } from "./github-status.ts";
 import { markSeen, restoreSeenMarks } from "./persistence.ts";
 import {
+	buildCmuxWorkspaceDescription,
+	setCmuxWorkspaceDescription,
+	type CmuxDescriptionProvider,
+} from "./cmux.ts";
+import {
 	deriveActionableNotifications,
 	formatDiagnosticsMarkdown,
 	renderPrStatus,
@@ -41,6 +46,8 @@ export type RefreshController = {
 	stop(): void;
 	getSnapshot(): GhSnapshot | undefined;
 	diagnostics(): string;
+	setCmuxDescriptionProvider?(provider?: CmuxDescriptionProvider): void;
+	updateCmuxWorkspace?(): void;
 };
 
 function errorPr(
@@ -71,10 +78,7 @@ function ignoreOnlyStaleContext(error: unknown): void {
 
 function renderSnapshot(ctx: ExtensionContext, snapshot: GhSnapshot): void {
 	try {
-		ctx.ui.setStatus(
-			"gh-status.service",
-			renderServiceStatus(snapshot.service),
-		);
+		ctx.ui.setStatus("gh-status.service", renderServiceStatus(snapshot.service));
 		ctx.ui.setStatus(
 			"gh-status.pr",
 			snapshot.repo.kind === "repo" ? renderPrStatus(snapshot.pr) : "",
@@ -99,6 +103,7 @@ export function createRefreshController(
 	let lastRefreshTime: Date | undefined;
 	let lastBranch: string | undefined;
 	let lastCommitSha: string | undefined;
+	let cmuxDescriptionProvider: CmuxDescriptionProvider | undefined;
 	const intervalMs = options.intervalMs ?? 120_000;
 	const maxBackoffMs = options.maxBackoffMs ?? 10 * 60_000;
 	const cacheWindowMs = options.cacheWindowMs ?? 45_000; // 45 seconds
@@ -107,6 +112,13 @@ export function createRefreshController(
 
 	function isRateLimited(): boolean {
 		return rateLimitBackoffUntil ? now() < rateLimitBackoffUntil : false;
+	}
+
+	function updateCmuxWorkspace(): void {
+		if (!snapshot) return;
+		setCmuxWorkspaceDescription(
+			buildCmuxWorkspaceDescription(snapshot, cmuxDescriptionProvider?.()),
+		);
 	}
 
 	function shouldSkipRefresh(
@@ -167,9 +179,7 @@ export function createRefreshController(
 		if (isRateLimit) {
 			// Exponential backoff for rate limits: start with 5 minutes, max 30 minutes
 			const backoffMinutes = Math.min(30, 5 * 2 ** timerFailures);
-			rateLimitBackoffUntil = new Date(
-				now().getTime() + backoffMinutes * 60_000,
-			);
+			rateLimitBackoffUntil = new Date(now().getTime() + backoffMinutes * 60_000);
 			try {
 				ctx.ui.notify(
 					`GitHub API rate limited. Backing off for ${backoffMinutes} minutes. Error: ${errorMessage.substring(0, 100)}`,
@@ -178,8 +188,6 @@ export function createRefreshController(
 			} catch (error) {
 				ignoreOnlyStaleContext(error);
 			}
-			// Log for debugging
-			console.warn("[gh-status] Rate limit detected:", errorMessage);
 		}
 	}
 
@@ -259,9 +267,8 @@ export function createRefreshController(
 		let currentGitInfo: { branch?: string; sha?: string } | undefined;
 		if (snapshot) {
 			currentGitInfo = await getCurrentGitInfo(ctx.cwd);
-			if (
-				shouldSkipRefresh(reason, currentGitInfo.branch, currentGitInfo.sha)
-			) {
+			if (shouldSkipRefresh(reason, currentGitInfo.branch, currentGitInfo.sha)) {
+				updateCmuxWorkspace();
 				return snapshot;
 			}
 		}
@@ -286,6 +293,7 @@ export function createRefreshController(
 				rateLimitBackoffUntil = undefined;
 
 				renderSnapshot(ctx, next);
+				updateCmuxWorkspace();
 				const notifications = deriveActionableNotifications(next, seen);
 				for (const notification of notifications) {
 					try {
@@ -328,10 +336,7 @@ export function createRefreshController(
 				.catch((error) => {
 					handleRateLimit(ctx, error);
 					timerFailures += 1;
-					const backoff = Math.min(
-						maxBackoffMs,
-						intervalMs * 2 ** timerFailures,
-					);
+					const backoff = Math.min(maxBackoffMs, intervalMs * 2 ** timerFailures);
 					scheduleNext(ctx, backoff);
 				});
 		}, delayMs);
@@ -359,6 +364,11 @@ export function createRefreshController(
 		getSnapshot() {
 			return snapshot;
 		},
+		setCmuxDescriptionProvider(provider) {
+			cmuxDescriptionProvider = provider;
+			updateCmuxWorkspace();
+		},
+		updateCmuxWorkspace,
 		diagnostics() {
 			let output = snapshot
 				? formatDiagnosticsMarkdown(snapshot)

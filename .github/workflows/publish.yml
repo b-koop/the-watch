@@ -1,0 +1,137 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 10
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test
+
+      - run: pnpm pack:check
+
+      - name: Read package version
+        id: package
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${PACKAGE_VERSION}"
+
+          if [[ ! "$PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "package.json version must match X.Y.Z;" >&2
+            echo "got '$PACKAGE_VERSION'." >&2
+            exit 1
+          fi
+
+          echo "name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether version is already published
+        id: published
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          PUBLISHED_VERSION="$(npm view \
+            "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json \
+            2>/dev/null || true)"
+          if [[ "$PUBLISHED_VERSION" == "\"${PACKAGE_VERSION}\"" \
+            || "$PUBLISHED_VERSION" == "$PACKAGE_VERSION" ]]; then
+            echo "Already published:"
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION}"
+            echo "skipping publish, tag, and release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version ${PACKAGE_NAME}@${PACKAGE_VERSION} is not published;"
+            echo "continuing."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate release tag
+        if: steps.published.outputs.exists != 'true'
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          TAG_VERSION="${RELEASE_TAG#v}"
+          if [[ "$PACKAGE_VERSION" != "$TAG_VERSION" ]]; then
+            echo "package.json version ($PACKAGE_VERSION)" >&2
+            echo "must match tag ($RELEASE_TAG)." >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --refs origin \
+            "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_TAG} already exists on origin;" >&2
+            echo "refusing to move or overwrite it." >&2
+            exit 1
+          fi
+
+      - name: Publish package to npm
+        if: steps.published.outputs.exists != 'true'
+        run: npm publish --provenance --access public
+
+      - name: Create and push release tag
+        if: steps.published.outputs.exists != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --refs origin \
+            "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_TAG} appeared on origin;" >&2
+            echo "refusing to move or overwrite it." >&2
+            exit 1
+          fi
+
+          git tag --annotate "$RELEASE_TAG" "$RELEASE_SHA" \
+            --message "Release $RELEASE_TAG"
+          git -c "http.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+            push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Create published GitHub Release
+        if: steps.published.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+        run: >-
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          --title "$RELEASE_TAG" --generate-notes --verify-tag

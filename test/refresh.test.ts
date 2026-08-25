@@ -26,7 +26,11 @@ type LifecycleHandler = (
 type FooterFactory = (
 	tui: unknown,
 	theme: { fg: (color: string, text: string) => string },
-	footerData: { getExtensionStatuses: () => Map<string, string> },
+	footerData: {
+		getExtensionStatuses: () => Map<string, string>;
+		getGitBranch?: () => string | null;
+		onBranchChange?: (listener: () => void) => () => void;
+	},
 ) => { render: (width: number) => string[] };
 
 function fakeContext(): ExtensionContext {
@@ -120,6 +124,34 @@ describe("render helpers", () => {
 		expect(renderPrStatus({ kind: "error", message: "boom" })).toBe(
 			"PR: ? boom",
 		);
+	});
+
+	it("shows merged instead of check details after a pull request is merged", () => {
+		expect(
+			renderPrStatus({
+				kind: "pr",
+				number: 3,
+				url: "u",
+				branch: "b",
+				state: "MERGED",
+				checks: [{ name: "ci", bucket: "fail" }],
+				activities: [],
+			}),
+		).toBe("PR #3: ✓ merged · 0 human");
+	});
+
+	it("shows merge queue instead of check details while a pull request is queued", () => {
+		expect(
+			renderPrStatus({
+				kind: "pr",
+				number: 4,
+				url: "u",
+				branch: "b",
+				mergeStateStatus: "QUEUED",
+				checks: [{ name: "ci", bucket: "pending" }],
+				activities: [],
+			}),
+		).toBe("PR #4: … merge queue · 0 human");
 	});
 
 	it("renders healthy, degraded, unknown, and stale service status", () => {
@@ -479,7 +511,10 @@ describe("ghStatusExtension", () => {
 		type FooterFactory = (
 			tui: unknown,
 			theme: { fg: (color: string, text: string) => string },
-			footerData: { getExtensionStatuses: () => Map<string, string> },
+			footerData: {
+				getExtensionStatuses: () => Map<string, string>;
+				getGitBranch?: () => string | null;
+			},
 		) => { render: (width: number) => string[] };
 		const handlers = new Map<string, LifecycleHandler[]>();
 		const exec = vi
@@ -543,9 +578,11 @@ describe("ghStatusExtension", () => {
 		expect(footerFactory).toBeDefined();
 		const lines = footerFactory?.({}, theme, {
 			getExtensionStatuses: () => statuses,
+			getGitBranch: () => "feature/footer",
 		}).render(80);
 
-		expect(lines?.[0]).toBe(
+		expect(lines?.[0]).toBe("no-model • feature/footer");
+		expect(lines?.[1]).toBe(
 			"GitHub: ! degraded".padEnd(80 - "PR #42: ✗ 1 failing · 0 human".length) +
 				"PR #42: ✗ 1 failing · 0 human",
 		);
@@ -562,8 +599,8 @@ describe("ghStatusExtension", () => {
 					["gh-status.pr", "PR #42: ✗ 1 failing · 0 human"],
 				]),
 		}).render(36);
-		expect(visibleWidth(narrowLines?.[0] ?? "")).toBe(36);
-		expect(narrowLines?.[0]?.endsWith("PR #42: ✗ 1 failing · 0 human")).toBe(
+		expect(visibleWidth(narrowLines?.[1] ?? "")).toBe(36);
+		expect(narrowLines?.[1]?.endsWith("PR #42: ✗ 1 failing · 0 human")).toBe(
 			true,
 		);
 
@@ -575,7 +612,7 @@ describe("ghStatusExtension", () => {
 					["gh-status.pr", "No PR"],
 				]),
 		}).render(80);
-		expect(noPrLines?.[0]?.endsWith("No PR")).toBe(true);
+		expect(noPrLines?.[1]?.endsWith("No PR")).toBe(true);
 		expect(noPrTheme.fg).toHaveBeenCalledWith("muted", "No PR");
 	});
 
@@ -619,8 +656,8 @@ describe("ghStatusExtension", () => {
 			},
 		).render(80);
 
-		expect(lines?.[0]?.trimEnd()).toBe("GitHub: ✓ All Systems Operational");
-		expect(lines?.[0]).not.toContain("PR");
+		expect(lines?.[1]?.trimEnd()).toBe("GitHub: ✓ All Systems Operational");
+		expect(lines?.[1]).not.toContain("PR");
 		handlers.get("session_shutdown")?.[0]?.({}, ctx);
 	});
 
@@ -672,8 +709,8 @@ describe("ghStatusExtension", () => {
 			},
 		).render(80);
 
-		expect(lines?.[0]?.trimEnd()).toBe("GitHub: ✓ All Systems Operational");
-		expect(lines?.[0]).not.toContain("PR");
+		expect(lines?.[1]?.trimEnd()).toBe("GitHub: ✓ All Systems Operational");
+		expect(lines?.[1]).not.toContain("PR");
 		expect(exec).toHaveBeenCalledTimes(2);
 		handlers.get("session_shutdown")?.[0]?.({}, ctx);
 	});
@@ -726,7 +763,7 @@ describe("ghStatusExtension", () => {
 		expect(ctx.ui.notify).toHaveBeenCalledWith("Watch is not running.", "info");
 		await watchCommand.handler("wat", ctx);
 		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Usage: /watch [start [--notify-only] [--local]|status|stop|now]",
+			"Usage: /watch [start [--notify-only] [--local] [--model=<provider/model>]|status|stop|now]",
 			"warning",
 		);
 		expect([...tools.keys()]).toEqual(

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import type {
 	ExtensionAPI,
@@ -9,6 +9,15 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_LOCAL_FALLBACK_SELECTORS } from "smart-model-run";
 import type { GhSnapshot } from "./gh-status/types.ts";
+import { resolveBaseRef } from "./base-branch.ts";
+import {
+	discoverReviewers,
+	deterministicReviewerPlan,
+	runReviewerHook,
+	type ReviewerCatalog,
+	type ReviewerHookResult,
+	type SelectedReviewer,
+} from "./vette-reviewers.ts";
 
 type TextBlock = { type: "text"; text: string };
 type LocalMessage = {
@@ -56,6 +65,18 @@ export type VetteBetaTopic = {
 	id: string;
 	label: string;
 	prompt: string;
+	reviewer?: Pick<
+		SelectedReviewer,
+		| "description"
+		| "selector"
+		| "source"
+		| "sourcePath"
+		| "matchReason"
+		| "body"
+		| "pre"
+		| "post"
+		| "priority"
+	>;
 };
 
 export type VetteBetaAttempt = {
@@ -81,6 +102,8 @@ export type VetteBetaTopicResult = {
 	parsed?: unknown;
 	errorMessage?: string;
 	aborted?: boolean;
+	reviewerMetadata?: VetteBetaTopic["reviewer"];
+	hookResults?: { pre: ReviewerHookResult[]; post: ReviewerHookResult[] };
 };
 
 export type VetteBetaReviewMode = "comment" | "repair" | "doc";
@@ -88,6 +111,8 @@ export type VetteBetaReviewMode = "comment" | "repair" | "doc";
 export type VetteBetaReviewTarget = {
 	label: string;
 	headRef?: string;
+	/** Prefer regression-only evidence and chunk large diffs by changed file. */
+	regression?: boolean;
 	baseRef?: string;
 	prNumber?: number;
 	prUrl?: string;
@@ -109,6 +134,8 @@ export type VetteBetaRunResult = {
 	aborted?: boolean;
 	changedPaths?: string[];
 	droppedUngroundedFindings?: number;
+	reviewerCatalog?: ReviewerCatalog;
+	reviewerPlan?: ReturnType<typeof deterministicReviewerPlan>;
 };
 
 export type PiAgentRunInput = {
@@ -162,6 +189,7 @@ export const DEFAULT_LOCAL_VETTE_MODEL = "ollama/ornith:35b";
 export const DEFAULT_LOCAL_VETTE_MODELS = [...DEFAULT_LOCAL_FALLBACK_SELECTORS];
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const MAX_DIFF_CHARS = 35_000;
+const DEFAULT_DIFF_CHUNK_CHARS = 12_000;
 const MAX_CAPTURED_AGENT_OUTPUT_CHARS = 1_000_000;
 const MAX_PENDING_JSON_LINE_CHARS = 5_000_000;
 
@@ -200,8 +228,7 @@ export async function loadTopicTimings(
 	try {
 		const raw = await readFile(path, "utf8");
 		const parsed = JSON.parse(raw) as unknown;
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-			return {};
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 		return parsed as TopicTimings;
 	} catch {
 		return {};
@@ -322,7 +349,7 @@ export const DEFAULT_VETTE_BETA_CONFIG: VetteBetaConfig = {
 		topicThinking: {
 			correctness: "medium",
 			"test-scenarios": "low",
-			"test-mocking": "low",
+			"test-quality": "low",
 			"error-handling": "medium",
 			"security-data": "high",
 			contracts: "medium",
@@ -349,10 +376,10 @@ export const VETTE_BETA_TOPICS: VetteBetaTopic[] = [
 			"Detect missing regression-catching test scenarios: changed observable behavior with no test that would fail if that behavior regressed, missing edge-case scenario, missing negative-path scenario, missing boundary scenario, or a deleted/disabled test that leaves behavior without equivalent coverage elsewhere. You may call out important pre-existing scenario gaps discovered while reviewing the diff, but mark them as follow-up rather than required for the current change. Do not report test style, weak matcher wording, mocks, snapshots, duplicate tests, or user-event realism; those belong to the test quality lane.",
 	},
 	{
-		id: "test-mocking",
+		id: "test-quality",
 		label: "Test quality",
 		prompt:
-			"Review changed test files only. Detect test quality issues: test names that do not accurately describe the behavior actually exercised and asserted; mocks/stubs/spies used where the dependency works inside an isolated test system and the real implementation or simple fake would be more honest; missing mocks/fakes for dependencies that do not work reliably in isolation, such as API calls, database access, external services, browser-only APIs, or components/web components that are not renderable in the test environment; multiple test cases that assert the same observable outcome without differing inputs, setup, or edge-case coverage (consider beforeEach/describe-level setup when judging distinctness); weak matchers (toBeTruthy, toBeFalsy, toBeDefined, or toBeUndefined as the sole assertion); brittle snapshots that capture noise such as generated class names, volatile values, or full DOM structure instead of the narrow behavior under test; and generic assertions where a domain-specific matcher would be clearer. For TypeScript tests using jsdom, prefer .toBeInTheDocument()/.not.toBeInTheDocument() for presence. Question fireEvent when userEvent would better model real async interactions, focus, typing, pointer, or keyboard behavior; fireEvent is acceptable for simple synchronous low-level DOM events. Flag brittle date/time tests where time is not frozen first, or where timezone/local-time/DST behavior is not pinned; prefer frozen time, and when freezing is not possible, harden the chosen timestamps/timezone expectations so the test is accurate without being flaky. Do not complain about justified isolation of network, filesystem, time, randomness, external APIs, expensive/flaky boundaries, or unrenderable platform components; return no findings when no changed test files are relevant.",
+			"Review changed test files only. Detect test quality issues: test names that do not accurately describe the behavior actually exercised and asserted; mocks/stubs/spies used where the dependency works inside an isolated test system and the real implementation or simple fake would be more honest; missing mocks/fakes for dependencies that do not work reliably in isolation, such as API calls, database access, external services, browser-only APIs, or components/web components that are not renderable in the test environment; multiple test cases that assert the same observable outcome without differing inputs, setup, or edge-case coverage (consider beforeEach/describe-level setup when judging distinctness); weak matchers (toBeTruthy, toBeFalsy, toBeDefined, or toBeUndefined as the sole assertion); brittle snapshots that capture noise such as generated class names, volatile values, or full DOM structure instead of the narrow behavior under test; and generic assertions where a domain-specific matcher would be clearer. Flag bundled expectations that hide independent behaviors: constructing an intermediate object, array, tuple, map, or `actual` value only to assert several separate observations at once, such as expect({ focusedToolbar, blurredToolbar }).toEqual(...), expect([button.disabled, label.textContent]).toEqual(...), or expect(actual).toMatchObject(...). Prefer direct assertions on each observable outcome with the most specific matcher available so intent and failures stay focused. For TypeScript tests using jsdom, prefer .toBeInTheDocument()/.not.toBeInTheDocument() for presence. Question fireEvent when userEvent would better model real async interactions, focus, typing, pointer, or keyboard behavior; fireEvent is acceptable for simple synchronous low-level DOM events. Flag jsdom/unit tests that claim to prove browser-owned interactions such as drag/drop, resize, pointer capture, focus management, selection, scrolling, keyboard navigation, or layout measurement through mocked getBoundingClientRect/offset/client geometry, synthetic pointer events, timers, style values, or callback calls; recommend keeping narrow unit coverage for deterministic logic and adding one browser-level regression, such as Playwright, for the actual user flow. Flag tests that assert DOM implementation details such as class names, Tailwind layout tokens, inline styles, CSS variables, data attributes, or internal structure when the user-visible result could be asserted through visible text, accessible role/name/state, enabled/disabled behavior, navigation, persisted values, rendered affordances, or completing the interaction. Treat assertions like toHaveClass plus visual Tailwind tokens such as top-, w-, h-, px-, py-, gap-, rounded, font-, shadow, translate, z-, or arbitrary values like w-[544px] as brittle unless they are the only practical regression signal; recommend behavior/accessibility assertions for unit tests and browser-level visual coverage for exact look/layout parity. Flag brittle date/time tests where time is not frozen first, or where timezone/local-time/DST behavior is not pinned; prefer frozen time, and when freezing is not possible, harden the chosen timestamps/timezone expectations so the test is accurate without being flaky. Do not complain about justified isolation of network, filesystem, time, randomness, external APIs, expensive/flaky boundaries, unrenderable platform components, or last-resort DOM probes when no user-visible assertion is available; return no findings when no changed test files are relevant.",
 	},
 	{
 		id: "error-handling",
@@ -435,8 +462,7 @@ function normalizeModelEntry(entry: VetteBetaModelEntry): VetteBetaModelEntry {
 		model,
 		thinking: entry.thinking?.trim() || "off",
 		timeoutMs:
-			Number.isFinite(entry.timeoutMs ?? Number.NaN) &&
-			(entry.timeoutMs ?? 0) > 0
+			Number.isFinite(entry.timeoutMs ?? Number.NaN) && (entry.timeoutMs ?? 0) > 0
 				? Math.round(entry.timeoutMs ?? defaultTimeoutMs)
 				: defaultTimeoutMs,
 	};
@@ -446,9 +472,7 @@ function modelSizeBillions(selector: string): number {
 	const id = modelId(selector).toLowerCase();
 	const matches = [...id.matchAll(/(\d+(?:\.\d+)?)\s*b\b/g)];
 	if (matches.length === 0) return 0;
-	return Math.max(
-		...matches.map((match) => Number.parseFloat(match[1] ?? "0")),
-	);
+	return Math.max(...matches.map((match) => Number.parseFloat(match[1] ?? "0")));
 }
 
 function localModelRank(selector: string): number {
@@ -521,6 +545,197 @@ export function forceLocalVetteBetaConfig(
 	};
 }
 
+const REMOTE_SMALL_MODEL_HINT = /mini|flash|haiku|small|4o-mini|gpt-5-mini/i;
+const LOCAL_7B_MIN_BILLIONS = 6;
+const LOCAL_7B_MAX_BILLIONS = 9;
+
+export type VetteComparePoolSelection = {
+	config: VetteBetaConfig;
+	remotePoolName: string;
+	localPoolName: string;
+	remoteModel: string;
+	localModel: string;
+};
+
+export type VetteCompareOptions = {
+	remoteModel?: string;
+	localModel?: string;
+};
+
+function compareModelId(selector: string): string {
+	const slash = selector.lastIndexOf("/");
+	return slash >= 0 ? selector.slice(slash + 1) : selector;
+}
+
+export function listVetteCompareRemoteModels(
+	config: VetteBetaConfig,
+): string[] {
+	const lightPool =
+		config.modelPools.light ?? DEFAULT_VETTE_BETA_CONFIG.modelPools.light;
+	return lightPool
+		.filter((entry) => !isLocalModelSelector(entry.model))
+		.map((entry) => entry.model);
+}
+
+export function listVetteCompareLocalModels(
+	modelRegistry?: ModelRegistryLike,
+): string[] {
+	return rankedLocalVetteModels(modelRegistry).map((entry) => entry.model);
+}
+
+export function resolveCompareModelSelector(
+	requested: string,
+	candidates: readonly string[],
+	role: "remote" | "local",
+): string {
+	const needle = requested.trim();
+	if (!needle) {
+		throw new Error(`Missing ${role} model selector.`);
+	}
+	const normalized = needle.toLowerCase();
+	const exact = candidates.find(
+		(candidate) => candidate.toLowerCase() === normalized,
+	);
+	if (exact) return exact;
+
+	const partial = candidates.filter((candidate) => {
+		const candidateLower = candidate.toLowerCase();
+		const id = compareModelId(candidate).toLowerCase();
+		return candidateLower.endsWith(`/${normalized}`) || id === normalized;
+	});
+	if (partial.length >= 1) {
+		return [...partial].sort(
+			(left, right) => candidates.indexOf(left) - candidates.indexOf(right),
+		)[0];
+	}
+	throw new Error(
+		`Unknown ${role} model '${requested}'. Available: ${candidates.join(", ")}`,
+	);
+}
+
+function defaultVetteCompareRemoteModel(
+	config: VetteBetaConfig,
+): VetteBetaModelEntry {
+	const remoteCandidates = listVetteCompareRemoteModels(config).map((model) =>
+		normalizeModelEntry({ model }),
+	);
+	if (remoteCandidates.length === 0) {
+		throw new Error(
+			"No remote model found in the light pool for /vette compare.",
+		);
+	}
+	return [...remoteCandidates].sort((left, right) => {
+		const hintDelta =
+			Number(REMOTE_SMALL_MODEL_HINT.test(right.model)) -
+			Number(REMOTE_SMALL_MODEL_HINT.test(left.model));
+		if (hintDelta !== 0) return hintDelta;
+		return left.model.localeCompare(right.model);
+	})[0];
+}
+
+function defaultVetteCompareLocalModel(
+	modelRegistry?: ModelRegistryLike,
+): VetteBetaModelEntry {
+	const localCandidates = rankedLocalVetteModels(modelRegistry).filter(
+		(entry) => {
+			const size = modelSizeBillions(entry.model);
+			return size >= LOCAL_7B_MIN_BILLIONS && size <= LOCAL_7B_MAX_BILLIONS;
+		},
+	);
+	const localEntry =
+		[...localCandidates].sort((left, right) => {
+			const leftIs7b = /(?:^|[^0-9])7b/i.test(left.model) ? 0 : 1;
+			const rightIs7b = /(?:^|[^0-9])7b/i.test(right.model) ? 0 : 1;
+			if (leftIs7b !== rightIs7b) return leftIs7b - rightIs7b;
+			return localModelRank(right.model) - localModelRank(left.model);
+		})[0] ??
+		[...rankedLocalVetteModels(modelRegistry)].sort(
+			(left, right) =>
+				modelSizeBillions(left.model) - modelSizeBillions(right.model),
+		)[0];
+	if (!localEntry) {
+		throw new Error(
+			"No local model available for /vette compare (expected a ~7B local model).",
+		);
+	}
+	return localEntry;
+}
+
+export function formatVetteCompareModels(input: {
+	remote: readonly string[];
+	local: readonly string[];
+	defaults?: { remote?: string; local?: string };
+}): string {
+	const lines = ["Vette compare model options:", "Remote (--model <selector>):"];
+	for (const model of input.remote) {
+		const marker = model === input.defaults?.remote ? " (default)" : "";
+		lines.push(`- ${model}${marker}`);
+	}
+	lines.push("Local (--local <selector>):");
+	for (const model of input.local) {
+		const marker = model === input.defaults?.local ? " (default)" : "";
+		lines.push(`- ${model}${marker}`);
+	}
+	lines.push(
+		"",
+		"Examples:",
+		"- /vette compare models",
+		"- /vette compare --model openai/gpt-4o-mini --local ollama/qwen2.5-coder:7b",
+	);
+	return lines.join("\n");
+}
+
+export function buildVetteCompareConfig(
+	baseConfig: VetteBetaConfig,
+	modelRegistry?: ModelRegistryLike,
+	options: VetteCompareOptions = {},
+): VetteComparePoolSelection {
+	const remoteCandidates = listVetteCompareRemoteModels(baseConfig);
+	const localCandidates = listVetteCompareLocalModels(modelRegistry);
+	const defaultRemote = defaultVetteCompareRemoteModel(baseConfig);
+	const defaultLocal = defaultVetteCompareLocalModel(modelRegistry);
+
+	const remoteModel = options.remoteModel
+		? resolveCompareModelSelector(options.remoteModel, remoteCandidates, "remote")
+		: defaultRemote.model;
+	const localModel = options.localModel
+		? resolveCompareModelSelector(options.localModel, localCandidates, "local")
+		: defaultLocal.model;
+
+	if (isLocalModelSelector(remoteModel)) {
+		throw new Error(`--model must be a remote/cloud model. Got: ${remoteModel}`);
+	}
+	if (!isLocalModelSelector(localModel)) {
+		throw new Error(
+			`--local must be a local model (ollama/lmstudio/local). Got: ${localModel}`,
+		);
+	}
+
+	const remoteEntry = normalizeModelEntry({ model: remoteModel });
+	const localEntry = normalizeModelEntry({ model: localModel });
+	const remotePoolName = "compare-remote-small";
+	const localPoolName = "compare-local-7b";
+	return {
+		config: {
+			...baseConfig,
+			modelPools: {
+				...baseConfig.modelPools,
+				[remotePoolName]: [remoteEntry],
+				[localPoolName]: [localEntry],
+			},
+			vetteBeta: {
+				...baseConfig.vetteBeta,
+				maxParallel: Math.min(baseConfig.vetteBeta.maxParallel, 4),
+				localMaxParallel: Math.min(baseConfig.vetteBeta.localMaxParallel, 2),
+			},
+		},
+		remotePoolName,
+		localPoolName,
+		remoteModel: remoteEntry.model,
+		localModel: localEntry.model,
+	};
+}
+
 function mergeConfig(partial: PartialVetteBetaConfig): VetteBetaConfig {
 	const modelPools: Record<string, VetteBetaModelEntry[]> = {
 		...DEFAULT_VETTE_BETA_CONFIG.modelPools,
@@ -558,16 +773,26 @@ function mergeConfig(partial: PartialVetteBetaConfig): VetteBetaConfig {
 				vetteBeta.tools.length > 0
 					? vetteBeta.tools.map((tool) => tool.trim()).filter(Boolean)
 					: DEFAULT_VETTE_BETA_CONFIG.vetteBeta.tools,
-			topicThinking: {
-				...DEFAULT_VETTE_BETA_CONFIG.vetteBeta.topicThinking,
-				...(isObject(vetteBeta.topicThinking)
+			topicThinking: (() => {
+				const entries = isObject(vetteBeta.topicThinking)
 					? Object.fromEntries(
 							Object.entries(vetteBeta.topicThinking).filter(
 								([, level]) => typeof level === "string" && level.trim(),
 							),
 						)
-					: {}),
-			},
+					: {};
+				if (
+					entries["test-quality"] === undefined &&
+					entries["test-mocking"] !== undefined
+				) {
+					entries["test-quality"] = entries["test-mocking"];
+				}
+				delete entries["test-mocking"];
+				return {
+					...DEFAULT_VETTE_BETA_CONFIG.vetteBeta.topicThinking,
+					...entries,
+				};
+			})(),
 			subagentExtensions: Array.isArray(vetteBeta.subagentExtensions)
 				? vetteBeta.subagentExtensions
 						.filter((path): path is string => typeof path === "string")
@@ -694,13 +919,19 @@ export function formatResolvedModelPool(input: {
 
 export class VetteBetaCooldown {
 	private readonly entries = new Map<string, number>();
+	private readonly options: {
+		now?: () => number;
+		cooldownMs?: number;
+	};
 
 	constructor(
-		private readonly options: {
+		options: {
 			now?: () => number;
 			cooldownMs?: number;
 		} = {},
-	) {}
+	) {
+		this.options = options;
+	}
 
 	private now(): number {
 		return this.options.now?.() ?? Date.now();
@@ -1006,13 +1237,16 @@ const spawnPiAgent: PiAgentRunner = (input) =>
 			if (usage?.inputTokens !== undefined) inputTokens = usage.inputTokens;
 			if (usage?.outputTokens !== undefined) outputTokens = usage.outputTokens;
 			if (parsed.type === "message_end" && isObject(parsed.message)) {
+				// SAFETY: JSON message_end payloads are validated as objects; the local runner contract supplies LocalMessage content.
 				const message = parsed.message as unknown as LocalMessage;
 				messages.push(message);
 				if (message.role === "assistant") {
 					finalText = textFromMessage(message);
+					// SAFETY: The child runner may attach an optional errorMessage field to assistant messages.
 					const maybeError = (message as unknown as { errorMessage?: unknown })
 						.errorMessage;
 					if (typeof maybeError === "string") errorMessage = maybeError;
+					// SAFETY: The child runner may attach an optional stopReason field to assistant messages.
 					const maybeStop = (message as unknown as { stopReason?: unknown })
 						.stopReason;
 					if (typeof maybeStop === "string") stopReason = maybeStop;
@@ -1052,8 +1286,8 @@ const spawnPiAgent: PiAgentRunner = (input) =>
 				...(errorMessage ? { errorMessage } : {}),
 				...(stopReason ? { stopReason } : {}),
 				durationMs: Date.now() - startedAt,
-				...(inputTokens !== undefined ? { inputTokens } : {}),
-				...(outputTokens !== undefined ? { outputTokens } : {}),
+				...(inputTokens === undefined ? {} : { inputTokens }),
+				...(outputTokens === undefined ? {} : { outputTokens }),
 			});
 		});
 		proc.on("error", (error) => {
@@ -1067,8 +1301,8 @@ const spawnPiAgent: PiAgentRunner = (input) =>
 				finalText,
 				errorMessage: error.message,
 				durationMs: Date.now() - startedAt,
-				...(inputTokens !== undefined ? { inputTokens } : {}),
-				...(outputTokens !== undefined ? { outputTokens } : {}),
+				...(inputTokens === undefined ? {} : { inputTokens }),
+				...(outputTokens === undefined ? {} : { outputTokens }),
 			});
 		});
 	});
@@ -1130,22 +1364,40 @@ export function wrapUntrustedContent(label: string, content: string): string {
 	].join("\n");
 }
 
-function buildTopicPrompt(input: {
-	topic: VetteBetaTopic;
-	bundle: string;
-}): string {
-	return `You are a lightweight single-topic pull request diff reviewer.
-
-Topic: ${input.topic.label}
-Scope: ${input.topic.prompt}
+/**
+ * The identical opening every topic agent shares: the rules and the diff bundle,
+ * byte-for-byte the same across topics.
+ *
+ * Order is load-bearing. Prompt caching matches on an exact prefix, so nothing
+ * topic-specific may appear before the bundle — the reviewer body in particular,
+ * which used to sit ahead of it and reduced the shared prefix to a few hundred
+ * characters while the whole bundle was re-sent per topic.
+ */
+export function buildTopicSharedPrefix(bundle: string): string {
+	const sharedInstructions = `You are a lightweight single-topic pull request diff reviewer.
 
 Rules:
-- Review only this topic. Do not broaden into unrelated review lanes.
+- Review only the assigned topic. Do not broaden into unrelated review lanes.
 - Focus on finding concrete or plausible issues only; do not spend effort proving the diff is clean.
 - Use the diff/context bundle first. Use read/grep/find/ls only if needed to verify changed-file context.
-- Return JSON only, with this exact shape:
+- Return JSON only, with the exact shape specified after the bundle.
+- If no finding is worth parent validation, return an empty findings array.`;
+	return `${sharedInstructions}\n\n${wrapUntrustedContent("diff/context bundle", bundle)}`;
+}
+
+/** The topic-specific tail. Everything that varies per topic lives here. */
+export function buildTopicSuffix(topic: VetteBetaTopic): string {
+	const reviewerBody = topic.reviewer?.body
+		? `${wrapUntrustedContent("reviewer Markdown instructions", topic.reviewer.body)}\n\n`
+		: "";
+	return `
+
+Topic: ${topic.label}
+Scope: ${topic.prompt}
+
+${reviewerBody}Return JSON only, with this exact shape:
 {
-  "topicId": "${input.topic.id}",
+  "topicId": "${topic.id}",
   "summary": "one sentence",
   "findings": [
     {
@@ -1157,10 +1409,14 @@ Rules:
       "recommendation": "smallest safe next check or fix"
     }
   ]
+}`;
 }
-- If no finding is worth parent validation, return an empty findings array.
 
-${wrapUntrustedContent("diff/context bundle", input.bundle)}`;
+function buildTopicPrompt(input: {
+	topic: VetteBetaTopic;
+	bundle: string;
+}): string {
+	return buildTopicSharedPrefix(input.bundle) + buildTopicSuffix(input.topic);
 }
 
 function discoverFallbackModels(
@@ -1188,8 +1444,7 @@ function discoverFallbackModels(
 
 	candidates.sort((left, right) => {
 		const providerDelta =
-			fallbackProviderRank(left.provider) -
-			fallbackProviderRank(right.provider);
+			fallbackProviderRank(left.provider) - fallbackProviderRank(right.provider);
 		if (providerDelta !== 0) return providerDelta;
 		const contextDelta =
 			(left.contextWindow ?? 200_000) - (right.contextWindow ?? 200_000);
@@ -1222,9 +1477,7 @@ export function groundTopicFindings(
 	if (!Array.isArray(findings) || findings.length === 0) {
 		return { result, dropped: 0 };
 	}
-	const pathSet = new Set(
-		changedPaths.map((path) => path.replace(/^\.\//, "")),
-	);
+	const pathSet = new Set(changedPaths.map((path) => path.replace(/^\.\//, "")));
 	const isGrounded = (file: unknown): boolean => {
 		if (typeof file !== "string" || !file.trim()) return true;
 		const candidate = file
@@ -1355,15 +1608,15 @@ export async function runTopicWithFallback(input: {
 				timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 				status: "success",
 				exitCode: result.exitCode,
-				...(result.durationMs !== undefined
-					? { durationMs: result.durationMs }
-					: {}),
-				...(result.inputTokens !== undefined
-					? { inputTokens: result.inputTokens }
-					: {}),
-				...(result.outputTokens !== undefined
-					? { outputTokens: result.outputTokens }
-					: {}),
+				...(result.durationMs === undefined
+					? {}
+					: { durationMs: result.durationMs }),
+				...(result.inputTokens === undefined
+					? {}
+					: { inputTokens: result.inputTokens }),
+				...(result.outputTokens === undefined
+					? {}
+					: { outputTokens: result.outputTokens }),
 			});
 			if (
 				SECOND_CLEAN_CHECK_TOPICS.has(input.topic.id) &&
@@ -1392,15 +1645,15 @@ export async function runTopicWithFallback(input: {
 			exitCode: result.exitCode,
 			...(result.timedOut ? { timedOut: true } : {}),
 			errorMessage: failure,
-			...(result.durationMs !== undefined
-				? { durationMs: result.durationMs }
-				: {}),
-			...(result.inputTokens !== undefined
-				? { inputTokens: result.inputTokens }
-				: {}),
-			...(result.outputTokens !== undefined
-				? { outputTokens: result.outputTokens }
-				: {}),
+			...(result.durationMs === undefined
+				? {}
+				: { durationMs: result.durationMs }),
+			...(result.inputTokens === undefined
+				? {}
+				: { inputTokens: result.inputTokens }),
+			...(result.outputTokens === undefined
+				? {}
+				: { outputTokens: result.outputTokens }),
 		});
 		input.cooldown.markFailure(entry.model, failure);
 	}
@@ -1463,15 +1716,15 @@ export async function runTopicWithFallback(input: {
 				timeoutMs: entry.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 				status: "success",
 				exitCode: result.exitCode,
-				...(result.durationMs !== undefined
-					? { durationMs: result.durationMs }
-					: {}),
-				...(result.inputTokens !== undefined
-					? { inputTokens: result.inputTokens }
-					: {}),
-				...(result.outputTokens !== undefined
-					? { outputTokens: result.outputTokens }
-					: {}),
+				...(result.durationMs === undefined
+					? {}
+					: { durationMs: result.durationMs }),
+				...(result.inputTokens === undefined
+					? {}
+					: { inputTokens: result.inputTokens }),
+				...(result.outputTokens === undefined
+					? {}
+					: { outputTokens: result.outputTokens }),
 			});
 			return {
 				topic: input.topic,
@@ -1492,15 +1745,15 @@ export async function runTopicWithFallback(input: {
 			exitCode: result.exitCode,
 			...(result.timedOut ? { timedOut: true } : {}),
 			errorMessage: failure,
-			...(result.durationMs !== undefined
-				? { durationMs: result.durationMs }
-				: {}),
-			...(result.inputTokens !== undefined
-				? { inputTokens: result.inputTokens }
-				: {}),
-			...(result.outputTokens !== undefined
-				? { outputTokens: result.outputTokens }
-				: {}),
+			...(result.durationMs === undefined
+				? {}
+				: { durationMs: result.durationMs }),
+			...(result.inputTokens === undefined
+				? {}
+				: { inputTokens: result.inputTokens }),
+			...(result.outputTokens === undefined
+				? {}
+				: { outputTokens: result.outputTokens }),
 		});
 		input.cooldown.markFailure(entry.model, failure);
 	}
@@ -1530,12 +1783,25 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	concurrency: number,
 	fn: (item: TIn, index: number) => Promise<TOut>,
 	signal?: AbortSignal,
+	/**
+	 * Run the first item alone before starting the pool. Every topic agent opens
+	 * with the same diff-bundle prefix, and a provider cache entry only becomes
+	 * available once the request that writes it finishes — so dispatching all
+	 * topics at once makes every one of them miss. Priming trades one topic's
+	 * latency for the bundle being billed at full rate once instead of per topic.
+	 */
+	primeFirst = false,
 ): Promise<Array<TOut | undefined>> {
 	const results: Array<TOut | undefined> = [];
 	results.length = items.length;
 	let next = 0;
+	if (primeFirst && items.length > 1) {
+		if (signal?.aborted) return results;
+		next = 1;
+		results[0] = await fn(items[0], 0);
+	}
 	const workers = Array.from(
-		{ length: Math.max(1, Math.min(concurrency, items.length)) },
+		{ length: Math.max(1, Math.min(concurrency, items.length - next)) },
 		async () => {
 			while (true) {
 				if (signal?.aborted) return undefined;
@@ -1653,8 +1919,7 @@ async function buildLinearRequirementsContext(input: {
 	const issueViews = await Promise.all(
 		issueIds.slice(0, 5).map(async (issueId) => {
 			const body = await firstSuccessful([
-				() =>
-					execText(input.exec, input.cwd, "linear", ["issue", "view", issueId]),
+				() => execText(input.exec, input.cwd, "linear", ["issue", "view", issueId]),
 			]);
 			return body
 				? `## ${issueId}\n${body}`
@@ -1778,10 +2043,125 @@ type DiffParts = {
 	rangeLabel: string;
 };
 
+async function buildLocalPrDiffParts(input: {
+	exec: ExecLike;
+	cwd: string;
+	prNumber: number;
+	baseRef: string;
+}): Promise<DiffParts | undefined> {
+	const worktree = await mkdtemp(join(tmpdir(), "pi-vette-pr-"));
+	try {
+		await execText(
+			input.exec,
+			input.cwd,
+			"git",
+			["fetch", "origin", `pull/${input.prNumber}/head`],
+			DIFF_EXEC_TIMEOUT_MS,
+		);
+		await execText(
+			input.exec,
+			input.cwd,
+			"git",
+			["worktree", "add", "--detach", worktree, "FETCH_HEAD"],
+			DIFF_EXEC_TIMEOUT_MS,
+		);
+		const mergeBase = await execText(input.exec, worktree, "git", [
+			"merge-base",
+			input.baseRef,
+			"HEAD",
+		]);
+		const [status, stat, diff] = await Promise.all([
+			execText(input.exec, worktree, "git", [
+				"diff",
+				"--name-status",
+				mergeBase,
+				"HEAD",
+			]),
+			execText(input.exec, worktree, "git", ["diff", "--stat", mergeBase, "HEAD"]),
+			execText(
+				input.exec,
+				worktree,
+				"git",
+				["diff", "--unified=80", mergeBase, "HEAD"],
+				DIFF_EXEC_TIMEOUT_MS,
+			),
+		]);
+		if (!diff.trim()) return undefined;
+		return {
+			status,
+			stat,
+			diff,
+			rangeLabel: `local worktree ${mergeBase}..HEAD`,
+		};
+	} finally {
+		await execText(
+			input.exec,
+			input.cwd,
+			"git",
+			["worktree", "remove", "--force", worktree],
+			DIFF_EXEC_TIMEOUT_MS,
+		).catch(() => {});
+		await rm(worktree, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+async function buildApiPrDiffParts(input: {
+	exec: ExecLike;
+	cwd: string;
+	prNumber: number;
+	repo?: { owner: string; name: string };
+}): Promise<DiffParts | undefined> {
+	if (!input.repo) return undefined;
+	try {
+		const raw = await execText(
+			input.exec,
+			input.cwd,
+			"gh",
+			[
+				"api",
+				"--paginate",
+				"--slurp",
+				`repos/${input.repo.owner}/${input.repo.name}/pulls/${input.prNumber}/files`,
+			],
+			DIFF_EXEC_TIMEOUT_MS,
+		);
+		const pages = JSON.parse(raw) as unknown;
+		const files = (Array.isArray(pages) ? pages.flat() : []) as Array<
+			Record<string, unknown>
+		>;
+		if (files.length === 0) return undefined;
+		const status = files
+			.map(
+				(file) => `${String(file.status ?? "M")}\t${String(file.filename ?? "")}`,
+			)
+			.filter((line) => !line.endsWith("\t"))
+			.join("\n");
+		const diff = files
+			.map((file) => {
+				const path = String(file.filename ?? "");
+				const patch =
+					typeof file.patch === "string"
+						? file.patch
+						: "[patch unavailable; inspect the changed file and tests]";
+				return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n${patch}`;
+			})
+			.join("\n\n");
+		return {
+			status,
+			stat: `${files.length} file(s) from GitHub files API`,
+			diff,
+			rangeLabel: `GitHub files API for PR #${input.prNumber}`,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
 async function buildPrDiffParts(input: {
 	exec: ExecLike;
 	cwd: string;
 	prNumber?: number;
+	repo?: { owner: string; name: string };
 }): Promise<DiffParts | undefined> {
 	if (!input.prNumber) return undefined;
 	const selector = String(input.prNumber);
@@ -1818,12 +2198,19 @@ async function buildPrDiffParts(input: {
 		}
 	}
 	if (!diff.trim()) {
+		const apiParts = await buildApiPrDiffParts({
+			exec: input.exec,
+			cwd: input.cwd,
+			prNumber: input.prNumber,
+			...(input.repo ? { repo: input.repo } : {}),
+		});
+		if (apiParts) return apiParts;
 		const reason =
 			lastDiffError instanceof Error
 				? lastDiffError.message
 				: "diff output was empty";
 		throw new VetteBetaDiffError(
-			`gh pr diff ${selector} produced no diff (${reason.trim() || "no details"}). Refusing to review without the PR diff.`,
+			`gh pr diff ${selector} produced no diff (${reason.trim() || "no details"}; files API fallback also failed). Refusing to review without the PR diff.`,
 		);
 	}
 	return {
@@ -1834,6 +2221,39 @@ async function buildPrDiffParts(input: {
 		diff,
 		rangeLabel: `gh pr diff ${selector}`,
 	};
+}
+
+export type VetteBetaDiffChunk = {
+	index: number;
+	paths: string[];
+	text: string;
+};
+
+/** Split a unified diff on file boundaries so large reviews have stable work units. */
+export function chunkDiffByFiles(
+	diff: string,
+	maxChars = DEFAULT_DIFF_CHUNK_CHARS,
+): VetteBetaDiffChunk[] {
+	if (!diff.trim()) return [];
+	const parts = diff.split(/(?=^diff --git )/gm).filter((part) => part.trim());
+	const chunks: VetteBetaDiffChunk[] = [];
+	let current = "";
+	let paths: string[] = [];
+	const flush = () => {
+		if (!current) return;
+		chunks.push({ index: chunks.length + 1, paths, text: current });
+		current = "";
+		paths = [];
+	};
+	for (const part of parts) {
+		const match = part.match(/^diff --git a\/(.+?) b\/(.+?)$/m);
+		const partPaths = match ? [...new Set([match[1], match[2]])] : [];
+		if (current && current.length + part.length > maxChars) flush();
+		current += part;
+		paths.push(...partPaths);
+	}
+	flush();
+	return chunks;
 }
 
 export function changedPathsFromDiff(status: string, diff: string): string[] {
@@ -1875,9 +2295,16 @@ export async function buildVetteBetaDiffBundle(input: {
 }): Promise<VetteBetaDiffBundle> {
 	const pr = input.snapshot?.pr.kind === "pr" ? input.snapshot.pr : undefined;
 	const requestedHeadRef = input.target?.headRef ?? "HEAD";
+	// No explicit target and no PR to read a base off: work out which branch
+	// this head was cut from rather than assuming the repo's default branch.
 	const baseRef =
 		input.target?.baseRef ??
-		(pr?.baseRefName ? `origin/${pr.baseRefName}` : "origin/main");
+		(pr?.baseRefName
+			? `origin/${pr.baseRefName}`
+			: await resolveBaseRef(
+					(args) => execText(input.exec, input.cwd, "git", args),
+					requestedHeadRef,
+				));
 	const headRef = input.target
 		? (await firstSuccessful([
 				() =>
@@ -1894,32 +2321,46 @@ export async function buildVetteBetaDiffBundle(input: {
 					]),
 			])) || requestedHeadRef
 		: requestedHeadRef;
-	const prDiffParts = await buildPrDiffParts({
-		exec: input.exec,
-		cwd: input.cwd,
-		prNumber: input.target?.prNumber,
-	});
+	const repo =
+		input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.repo : undefined;
+	let localPrDiffParts: DiffParts | undefined;
+	if (input.target?.regression && input.target.prNumber) {
+		localPrDiffParts = await buildLocalPrDiffParts({
+			exec: input.exec,
+			cwd: input.cwd,
+			prNumber: input.target.prNumber,
+			baseRef,
+		});
+		if (!localPrDiffParts) {
+			throw new VetteBetaDiffError(
+				`local worktree diff for PR #${input.target.prNumber} was empty or could not be built. Refusing to fall back to a remote/API diff in regression mode.`,
+			);
+		}
+	}
+	const prDiffParts =
+		localPrDiffParts ??
+		(await buildPrDiffParts({
+			exec: input.exec,
+			cwd: input.cwd,
+			prNumber: input.target?.prNumber,
+			...(repo ? { repo } : {}),
+		}));
 	const mergeBase = prDiffParts
 		? ""
 		: await firstSuccessful([
 				() =>
-					execText(input.exec, input.cwd, "git", [
-						"merge-base",
-						baseRef,
-						headRef,
-					]),
+					execText(input.exec, input.cwd, "git", ["merge-base", baseRef, headRef]),
+				// Same base, but local-only: a worktree that never fetched the
+				// remote still has the branch itself.
 				() =>
 					execText(input.exec, input.cwd, "git", [
 						"merge-base",
-						"main",
+						baseRef.replace(/^origin\//, ""),
 						headRef,
 					]),
-				() =>
-					execText(input.exec, input.cwd, "git", ["rev-parse", `${headRef}~1`]),
+				() => execText(input.exec, input.cwd, "git", ["rev-parse", `${headRef}~1`]),
 			]);
-	const rangeArgs = mergeBase
-		? [mergeBase, headRef]
-		: [`${headRef}~1`, headRef];
+	const rangeArgs = mergeBase ? [mergeBase, headRef] : [`${headRef}~1`, headRef];
 	const gitDiffParts = prDiffParts
 		? undefined
 		: await Promise.all([
@@ -1933,11 +2374,7 @@ export async function buildVetteBetaDiffBundle(input: {
 				]),
 				firstSuccessful([
 					() =>
-						execText(input.exec, input.cwd, "git", [
-							"diff",
-							"--stat",
-							...rangeArgs,
-						]),
+						execText(input.exec, input.cwd, "git", ["diff", "--stat", ...rangeArgs]),
 				]),
 				firstSuccessful([
 					() =>
@@ -1962,8 +2399,7 @@ export async function buildVetteBetaDiffBundle(input: {
 					() => execText(input.exec, input.cwd, "git", ["status", "--short"]),
 				]),
 				firstSuccessful([
-					() =>
-						execText(input.exec, input.cwd, "git", ["diff", "--stat", "HEAD"]),
+					() => execText(input.exec, input.cwd, "git", ["diff", "--stat", "HEAD"]),
 				]),
 				firstSuccessful([
 					() =>
@@ -2007,6 +2443,37 @@ export async function buildVetteBetaDiffBundle(input: {
 					diff,
 				}),
 			]);
+	const testPaths = changedPaths.filter((path) =>
+		/(^|\/)(test|tests|__tests__)(\/|$)|\.(test|spec)\.[^/.]+$/i.test(path),
+	);
+	const codePaths = changedPaths.filter((path) => !testPaths.includes(path));
+	const movedPaths = status
+		.split("\n")
+		.filter((line) => /^R\d*\t/.test(line.trim()))
+		.map((line) => line.trim());
+	const regressionContext = input.target?.regression
+		? [
+				"Regression review:",
+				"Prioritize no-regression evidence over style: compare changed production paths with changed, moved, deleted, and missing tests.",
+				`Change inventory: ${codePaths.length} production/code path(s), ${testPaths.length} test path(s), ${movedPaths.length} rename/move record(s).`,
+				movedPaths.length > 0
+					? `Movement records: ${movedPaths.slice(0, 20).join(" | ")}`
+					: "Movement records: none detected in the name-status output.",
+				"For large changes, review one directory/subsystem chunk at a time and report the chunk path in every finding.",
+				"Compare code movement/renames against test movement and flag behavior changes whose tests were not moved or expanded.",
+			].join("\n")
+		: "";
+	const diffChunks = chunkDiffByFiles(diff);
+	const chunkContext =
+		diffChunks.length > 1
+			? [
+					`Diff chunks: ${diffChunks.length} stable file-boundary chunks`,
+					...diffChunks.map(
+						(chunk) =>
+							`- chunk ${chunk.index}: ${chunk.paths.join(", ") || "paths unavailable"}`,
+					),
+				].join("\n")
+			: "";
 	const text = [
 		`Repository: ${input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.repo.fullName : "<unknown>"}`,
 		`Target: ${input.target?.label ?? (requestedHeadRef === "HEAD" ? "current worktree" : requestedHeadRef)}`,
@@ -2029,10 +2496,24 @@ export async function buildVetteBetaDiffBundle(input: {
 		"",
 		behaviorSpecsContext,
 		"",
+		regressionContext,
+		chunkContext,
+		"",
 		"Diff:",
 		truncateText(diff || "<empty diff>", MAX_DIFF_CHARS),
 	].join("\n");
 	return { text, changedPaths, isEmpty };
+}
+
+export function topicsFromReviewers(
+	reviewers: readonly SelectedReviewer[],
+): VetteBetaTopic[] {
+	return reviewers.map((reviewer) => ({
+		id: reviewer.name,
+		label: reviewer.name,
+		prompt: reviewer.selector ?? reviewer.description,
+		reviewer,
+	}));
 }
 
 export async function runVetteBetaReview(input: {
@@ -2048,8 +2529,13 @@ export async function runVetteBetaReview(input: {
 	snapshot?: GhSnapshot;
 	target?: VetteBetaReviewTarget;
 	reviewMode?: VetteBetaReviewMode;
+	poolName?: string;
 	topics?: VetteBetaTopic[];
-	onBundleReady?: (info: { bundleDurationMs: number }) => void;
+	reviewerCatalog?: ReviewerCatalog;
+	onBundleReady?: (info: {
+		bundleDurationMs: number;
+		reviewerCatalog?: ReviewerCatalog;
+	}) => void;
 	onTopicStart?: (info: {
 		topic: VetteBetaTopic;
 		index: number;
@@ -2071,13 +2557,16 @@ export async function runVetteBetaReview(input: {
 	const startedAt = new Date(startedMs).toISOString();
 	const cwd = input.ctx.cwd;
 	const signal = input.ctx.signal;
+	// SAFETY: Extension contexts expose modelRegistry at runtime, but the SDK type omits it.
 	const modelRegistry = (
 		input.ctx as unknown as { modelRegistry?: ModelRegistryLike }
 	).modelRegistry;
-	const registryPool = resolveModelPool({
+	const resolvedPool = resolveModelPool({
 		config: input.config,
 		modelRegistry,
-	}).entries;
+		...(input.poolName ? { poolName: input.poolName } : {}),
+	});
+	const registryPool = resolvedPool.entries;
 	const extensionPaths = resolveSubagentExtensionPaths({
 		config: input.config,
 		poolModels: registryPool.map((entry) => entry.model),
@@ -2140,8 +2629,14 @@ export async function runVetteBetaReview(input: {
 		);
 	}
 	const bundle = diffBundle.text;
-	input.onBundleReady?.({ bundleDurationMs: Date.now() - bundleStart });
-	const topics = input.topics ?? VETTE_BETA_TOPICS;
+	const reviewerCatalog =
+		input.reviewerCatalog ??
+		(await discoverReviewers(cwd, diffBundle.changedPaths));
+	input.onBundleReady?.({
+		bundleDurationMs: Date.now() - bundleStart,
+		reviewerCatalog,
+	});
+	const topics = input.topics ?? topicsFromReviewers(reviewerCatalog.selected);
 	const timings = await loadTopicTimings();
 	const sortedTopics = sortTopicsSlowestFirst(topics, timings);
 	let completedCount = 0;
@@ -2153,6 +2648,37 @@ export async function runVetteBetaReview(input: {
 		async (topic, index) => {
 			input.onTopicStart?.({ topic, index, total: sortedTopics.length });
 			const topicStart = Date.now();
+			const preHooks: ReviewerHookResult[] = [];
+			for (const command of topic.reviewer?.pre ?? []) {
+				const hook = await runReviewerHook(command, {
+					cwd,
+					changedFiles: diffBundle.changedPaths,
+					reviewerName: topic.id,
+					outputDir: "/tmp/pi-vette-hooks",
+				});
+				preHooks.push(hook);
+				if (hook.exitCode !== 0 || hook.timedOut || hook.error) {
+					const blocked: VetteBetaTopicResult = {
+						topic,
+						attempts: [],
+						ok: false,
+						output: "",
+						errorMessage: `pre-hook blocked reviewer: ${(hook.error ?? hook.stderr) || `exit ${hook.exitCode}`}`,
+						reviewerMetadata: topic.reviewer,
+						hookResults: { pre: preHooks, post: [] },
+					};
+					completedCount += 1;
+					input.onTopicComplete?.({
+						completed: completedCount,
+						total: sortedTopics.length,
+						topic,
+						ok: false,
+						findingsCount: 0,
+						durationMs: Date.now() - topicStart,
+					});
+					return blocked;
+				}
+			}
 			const rawResult = await runTopicWithFallback({
 				topic,
 				bundle,
@@ -2169,13 +2695,26 @@ export async function runVetteBetaReview(input: {
 			});
 			const grounded = groundTopicFindings(rawResult, diffBundle.changedPaths);
 			droppedUngroundedFindings += grounded.dropped;
-			const result = grounded.result;
+			let result = grounded.result;
+			const postHooks: ReviewerHookResult[] = [];
+			for (const command of topic.reviewer?.post ?? [])
+				postHooks.push(
+					await runReviewerHook(command, {
+						cwd,
+						changedFiles: diffBundle.changedPaths,
+						reviewerName: topic.id,
+						outputDir: "/tmp/pi-vette-hooks",
+					}),
+				);
+			result = {
+				...result,
+				reviewerMetadata: topic.reviewer,
+				hookResults: { pre: preHooks, post: postHooks },
+			};
 			completedCount += 1;
 			const topicDurationMs = Date.now() - topicStart;
 			const findingsCount = countParsedFindings(result.parsed);
-			const successAttempt = result.attempts.find(
-				(a) => a.status === "success",
-			);
+			const successAttempt = result.attempts.find((a) => a.status === "success");
 			if (result.ok && result.finalModel) {
 				updatedTimings = recordTopicTiming(updatedTimings, topic.id, {
 					durationMs: topicDurationMs,
@@ -2197,12 +2736,14 @@ export async function runVetteBetaReview(input: {
 			return result;
 		},
 		signal,
+		// Prime the shared diff prefix with one topic before fanning out.
+		true,
 	);
 	await saveTopicTimings(updatedTimings).catch(() => {});
 	const finishedMs = Date.now();
 	const wasAborted = signal?.aborted === true;
 	return {
-		poolName: input.config.vetteBeta.modelPool,
+		poolName: input.poolName ?? input.config.vetteBeta.modelPool,
 		resolvedPool: pool,
 		bundle,
 		// Topics never dispatched because the run aborted get explicit
@@ -2218,6 +2759,8 @@ export async function runVetteBetaReview(input: {
 		...(wasAborted ? { aborted: true } : {}),
 		changedPaths: diffBundle.changedPaths,
 		droppedUngroundedFindings,
+		reviewerCatalog,
+		reviewerPlan: deterministicReviewerPlan(reviewerCatalog),
 	};
 }
 
@@ -2266,6 +2809,7 @@ export function formatVetteBetaSynthesisPrompt(
 	options: {
 		noPost?: boolean;
 		localOnly?: boolean;
+		commentsOnly?: boolean;
 	} = {},
 ): string {
 	const ok = run.results.filter((result) => result.ok).length;
@@ -2277,6 +2821,8 @@ export function formatVetteBetaSynthesisPrompt(
 	const isDocMode = run.reviewMode === "doc";
 	const noPost = options.noPost === true;
 	const localOnly = options.localOnly === true;
+	const commentsOnly = options.commentsOnly === true;
+	const fallowBaseRef = run.target?.baseRef ?? "origin/main";
 	let actionInstruction: string;
 	let modeLabel: string;
 	let toolsHeading = "Available tools for verification and posting:";
@@ -2286,9 +2832,27 @@ export function formatVetteBetaSynthesisPrompt(
 	let inlinePostInstruction = "";
 	let phaseFourInstruction: string;
 	let finishInstruction: string;
-	let templateIntro: string;
 
-	if (isRepairMode) {
+	if (commentsOnly) {
+		actionInstruction =
+			"COMMENT-ONLY SAFETY CONTRACT: review and verify the diff, then post only ordinary inline or general PR comments for verified findings. Never edit source files, create or modify tests, commit, push, approve, request changes, submit a review decision, or run any repair workflow. If no finding is verified, post nothing and report a clean review.";
+		modeLabel = "comment-only external review";
+		toolsHeading =
+			"Available tools for read-only verification and comment posting:";
+		shellToolInstruction =
+			"- Use shell/bash only to inspect files, run read-only checks, and post ordinary comments; never use commands that edit files, commit, push, approve, request changes, or submit a review decision.";
+		toolInstruction =
+			"- Comment-only mode: use only ordinary inline/general comment endpoints; never call a review-decision endpoint or send APPROVE, REQUEST_CHANGES, or equivalent payloads.";
+		if (hasPrTarget) {
+			actionInstruction += ` After verification, produce the strict JSON comment array and pass it to scripts/post-vette-comments.ts; do not invent Markdown or call GitHub endpoints independently.`;
+			inlinePostInstruction =
+				"- The shared JSON parser/poster performs the only posting pass and handles exact-line, file-level, and general fallbacks; never use review-decision endpoints.";
+		}
+		phaseFourInstruction =
+			"4. Verify each remaining finding with existing read-only checks or evidence. Do not create repro tests or alter any repository file.";
+		finishInstruction =
+			"6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items; no repair counts or review disposition.";
+	} else if (isRepairMode) {
 		actionInstruction =
 			"This is an owned/self review. Do not post or draft PR review comments as the primary output. Verify candidates, fix confirmed issues directly in the working tree with focused changes, add or update focused tests where practical, and report fixed items plus any unresolved blockers. Do not commit.";
 		modeLabel = "owned/self repair";
@@ -2298,8 +2862,6 @@ export function formatVetteBetaSynthesisPrompt(
 			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, fixed, still failing, and blocked items.";
-		templateIntro =
-			"Use this repair evidence template for verified findings you fix or leave unresolved:";
 	} else if (isDocMode) {
 		actionInstruction =
 			"DOC MODE (/vette doc): produce a local-only findings report. Do not post or draft PR comments, do not modify source files, do not create temporary repro tests, and do not run a TDD repair loop. Preserve actionable items with best file/line context and mark unverified items clearly.";
@@ -2313,23 +2875,23 @@ export function formatVetteBetaSynthesisPrompt(
 			"4. Do not create repro tests or edit files; if a finding would need TDD-style proof, mark the needed verification instead of building it.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, unverified items, and blocked items.";
-		templateIntro = "Use this local findings template:";
 	} else {
 		modeLabel = "external/comment review";
 		phaseFourInstruction =
 			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.";
-		templateIntro = "Use this comment template for verified findings:";
 		if (noPost) {
 			actionInstruction =
 				"DRY RUN (--no-post): do not post any GitHub comments or reviews. Prepare comment-ready markdown for verified findings with best file/line context and present it in the final report only.";
 			toolInstruction =
 				"- Dry run (--no-post): prepare comment-ready markdown only; do not run any posting commands.";
 		} else if (hasPrTarget) {
-			actionInstruction = `After verification is complete, post verified findings to ${run.target?.prUrl} in one final comment pass. Use the gh CLI via your shell/bash tool to post comments. Prefer exact file/line review comments when possible; fall back to one grouped PR comment for verified findings without reliable line placement.`;
-			toolInstruction = `- Use \`gh pr comment ${run.target?.prNumber} --body <body>\` to post a general PR comment.`;
-			inlinePostInstruction = `- Use \`gh api repos/{owner}/{repo}/pulls/${run.target?.prNumber}/comments --method POST -f body=<body> -f commit_id=<sha> -f path=<file> -F position:=<line>\` for inline file/line comments, or fall back to \`gh pr comment\` for general comments.`;
+			actionInstruction = `After verification is complete, produce the strict JSON comment array and pass it to scripts/post-vette-comments.ts for one final posting pass. Do not invent Markdown or call GitHub endpoints independently. post verified findings to ${run.target?.prUrl} only through that boundary.`;
+			toolInstruction =
+				"- Use the shared JSON parser/poster only; it validates the complete array before posting and records fallback results.";
+			inlinePostInstruction =
+				"- The shared poster chooses exact-line, file-level, then general placement using argument arrays; never call review-decision endpoints.";
 		} else {
 			actionInstruction =
 				"No PR target was resolved, so do not post comments. Instead prepare comment-ready markdown with best file/line context and explain that posting requires /vette <pr>.";
@@ -2346,6 +2908,14 @@ export function formatVetteBetaSynthesisPrompt(
 		`Usage: ${formatTokens(totalInputTokens, totalOutputTokens)} across all topic-agent attempts.`,
 		`Succeeded: ${ok}; failed: ${failed}.`,
 		`Mode: ${modeLabel}.`,
+		...(run.reviewerPlan
+			? [
+					"Reviewer execution plan:",
+					`- selected (${run.reviewerPlan.order.length}): ${run.reviewerPlan.order.join(", ") || "none"}`,
+					`- skipped (${run.reviewerPlan.skipped.length}): ${run.reviewerPlan.skipped.map((item) => `${item.name} (${item.reason})`).join(", ") || "none"}`,
+					`- router fallback: ${run.reviewerPlan.fallback ? "deterministic" : "router"}`,
+				]
+			: []),
 		...(run.changedPaths && run.changedPaths.length > 0
 			? [
 					"",
@@ -2363,10 +2933,16 @@ export function formatVetteBetaSynthesisPrompt(
 				]
 			: []),
 		"",
+		...(commentsOnly
+			? [
+					"COMMENT-ONLY CONTRACT (NON-NEGOTIABLE): this automation may post ordinary inline/general PR comments only. It must never edit files, create or modify tests, commit, push, approve, request changes, submit a review, or invoke a review-decision endpoint.",
+				]
+			: []),
 		"Continue the full vette workflow from these topic-agent results; do not stop at a summary.",
 		"",
 		"Required Fallow audit leg:",
-		"- Run `pnpx fallow audit --base origin/main --gate new-only` after reading the topic-agent results and before final synthesis. If origin/main is unavailable, use the reviewed base branch/ref shown in the diff context.",
+		`- Run \`pnpx fallow audit --base ${fallowBaseRef} --gate new-only\` after reading the topic-agent results and before final synthesis. If ${fallowBaseRef} is unavailable, use the reviewed base branch/ref shown in the diff context.`,
+		"- Run the Fallow command once per vette pass. Fallow may exit with status 1 when it successfully found audit items. Treat exit 1 with usable findings/output as a completed audit result, not as a failed run; do not rerun it solely because the exit code is 1 or because advisory findings were reported. Only rerun or mark failed when the command produces no usable output or shows an execution/configuration error.",
 		"- Treat Fallow output as advisory candidates, not verified findings. Deduplicate it against topic findings and changed files.",
 		"- For every Fallow item considered useful, verify it with the same evidence gate as other findings before fixing, posting, or reporting it.",
 		"- For noisy, duplicate, pre-existing, or out-of-scope Fallow items, summarize why they were rejected so the run can be evaluated for usefulness.",
@@ -2376,7 +2952,9 @@ export function formatVetteBetaSynthesisPrompt(
 		"- Use read/grep/find/ls tools to inspect source files and verify findings against actual code.",
 		toolInstruction,
 		inlinePostInstruction,
-		"- If a tool is unavailable or a command fails, report the specific error rather than declaring the phase blocked.",
+		"- If a verification, pipeline, or check command fails, retry the exact command up to 3 total attempts before declaring it still failing. Stop early on success and record every attempt/outcome. Do not apply this retry rule to Fallow exit 1 with usable output; that is an audit result with findings, not a failed command.",
+		"- If a test command fails after the exact-command retry, run one second dependency install attempt, then run the repository build/rebuild command, then rerun the focused test before preparing or posting any comments.",
+		"- If a tool is unavailable or a command still fails after retries, report the specific error rather than declaring the phase blocked.",
 		"",
 		"Required next phases:",
 		"1. Parse and deduplicate all topic findings into stable finding IDs, preserving topic/model provenance.",
@@ -2391,17 +2969,24 @@ export function formatVetteBetaSynthesisPrompt(
 		`5. ${actionInstruction}`,
 		finishInstruction,
 		"",
-		"PR comment style contract:",
-		"- At the very top of every prepared or posted review comment, before any <details> block or suggestion fence, include exactly one scan label line: `🔴 **Blocker**`, `🟡 **Recommended**`, or `🔵 **Note**`. Map topic severities as blocker → Blocker, concern → Recommended, and suggestion → Note.",
-		"- Every substantive verified issue comment must use a <details> block with a one-sentence <summary> that plainly states what breaks and why it is a bug.",
-		"- Keep verification details, commands, counts, topic/model provenance, repro code, and fix boundaries inside the expanded details body; do not overload the summary.",
-		"- GitHub rendering rule: always leave one blank line after the closing </summary> tag before hidden Markdown content starts, especially before lists, headings, or fenced code blocks.",
-		"- Put long logs and repro/test code inside fenced code blocks within the expanded details body.",
-		"- If you prepare one final grouped comment for verified-but-untestable findings, start with one short non-scary sentence and put each finding in its own nested <details> block with a concise bug-reason summary.",
+		"JSON comment contract (the only accepted synthesis output for review comments):",
+		"PR comment style contract: the shared renderer owns Markdown formatting.",
+		"- Return a JSON array only. Each item requires title, severity (blocker|recommended|note), codeSummary, what, and why; file and line are optional, and line must be a positive integer when present.",
+		"- evidence, testCode, and fixBoundary are optional. Whenever a focused or regression test is created, include its complete source in testCode; never leave test code only in evidence or the final report. Preserve verification details in evidence and the smallest intended change in fixBoundary.",
+		"- Pass the complete JSON string to scripts/post-vette-comments.ts; the shared parser validates the entire array before posting.",
+		"- The shared renderer provides stable severity labels and headings: Code summary, What, Why, and optional Evidence/Regression test/Fix boundary.",
+		"- Renderer compatibility labels: 🔴 **Blocker**, 🟡 **Recommended**, 🔵 **Note**; details summaries remain behavior-first; do not overload the summary.",
+		"- Renderer: always leave one blank line after the closing </summary> tag.",
+		"- Put long logs inside evidence; provide repro/test source through testCode so the shared renderer posts it in a fenced Regression test section.",
+		"- Split verified-but-untestable findings onto the specific affected file or line whenever possible, using file-level review comments when exact line placement is unreliable, so each affected file can be resolved separately.",
+		"- Prepare a final grouped comment only for verified-but-untestable findings that cannot be anchored to a useful changed file; start with one short non-scary sentence and put each finding in its own nested <details> block with a concise bug-reason summary.",
 		"- Preserve minimal GitHub ```suggest blocks for naming-only suggestions; do not wrap those in the verified issue template.",
 		"",
-		templateIntro,
-		"🔴 **Blocker** | 🟡 **Recommended** | 🔵 **Note**",
+		"Use this local findings template only as legacy wording; emit JSON instead.",
+		"<summary>Verified issue: <one sentence stating what breaks and why></summary>",
+		"Synthesis output example (emit JSON, not this Markdown):",
+		'[{"title":"behavior-first issue","severity":"recommended","codeSummary":"changed code","what":"incorrect behavior","why":"user impact"}]',
+
 		"",
 		"<details>",
 		"  <summary>Verified issue: <one sentence stating what breaks and why></summary>",

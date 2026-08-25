@@ -19,6 +19,7 @@
   "include": [
     "extensions/**/*.ts",
     "test/**/*.ts",
+    "scripts/**/*.ts",
     "vitest.config.ts"
   ]
 }

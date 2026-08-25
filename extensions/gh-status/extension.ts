@@ -64,79 +64,96 @@ function canFitThreeColumnFooter(input: {
 	return contentWidth + requiredGapWidth <= input.width;
 }
 
-const githubFooter: FooterFactory = (_tui, theme, footerData) => ({
-	invalidate() {},
-	render(width: number) {
-		const statuses = footerData.getExtensionStatuses();
-		const service = statuses.get("gh-status.service") ?? "";
-		const pr = statuses.get("gh-status.pr") ?? "";
-		const watch = statuses.get("watch.watch") ?? "";
-		const hasFooterStatus = Boolean(service || pr || watch);
-		if (!hasFooterStatus) return [];
+function createGithubFooter(ctx: ExtensionContext): FooterFactory {
+	return (tui, theme, footerData) => ({
+		invalidate() {},
+		dispose: footerData.onBranchChange?.(() => tui.requestRender()),
+		render(width: number) {
+			const statuses = footerData.getExtensionStatuses();
+			const service = statuses.get("gh-status.service") ?? "";
+			const pr = statuses.get("gh-status.pr") ?? "";
+			const watch = statuses.get("watch.watch") ?? "";
+			const model = ctx.model?.id ?? "no-model";
+			const branch = footerData.getGitBranch?.() ?? "no git";
+			const modelLine = truncateToWidth(
+				theme.fg("dim", `${model} • ${branch}`),
+				width,
+				theme.fg("dim", "..."),
+			);
+			const hasFooterStatus = Boolean(service || pr || watch);
+			if (!hasFooterStatus) return [modelLine];
 
-		const left = theme.fg(statusSeverity(service), service);
-		const right = theme.fg(statusSeverity(pr), pr);
-		const watchStatus = watch ? theme.fg("warning", watch) : "";
+			const left = theme.fg(statusSeverity(service), service);
+			const right = theme.fg(statusSeverity(pr), pr);
+			const watchStatus = watch ? theme.fg("warning", watch) : "";
 
-		// If watch is active, show three-column layout
-		if (watchStatus) {
-			const leftWidth = visibleWidth(left);
-			const middleWidth = visibleWidth(watchStatus);
-			const rightWidth = visibleWidth(right);
-			if (
-				canFitThreeColumnFooter({
-					width,
-					leftWidth,
-					middleWidth,
-					rightWidth,
-				})
-			) {
-				const leftGap = Math.max(
-					1,
-					Math.floor((width - leftWidth - middleWidth - rightWidth) / 2),
+			// If watch is active, show three-column layout
+			if (watchStatus) {
+				const leftWidth = visibleWidth(left);
+				const middleWidth = visibleWidth(watchStatus);
+				const rightWidth = visibleWidth(right);
+				if (
+					canFitThreeColumnFooter({
+						width,
+						leftWidth,
+						middleWidth,
+						rightWidth,
+					})
+				) {
+					const leftGap = Math.max(
+						1,
+						Math.floor((width - leftWidth - middleWidth - rightWidth) / 2),
+					);
+					const rightGap = Math.max(
+						1,
+						width - leftWidth - leftGap - middleWidth - rightWidth,
+					);
+					return [
+						modelLine,
+						`${left}${" ".repeat(leftGap)}${watchStatus}${" ".repeat(rightGap)}${right}`,
+					];
+				}
+
+				// If it doesn't fit, prioritize PR > watch > service
+				if (rightWidth >= width) {
+					return [modelLine, truncateToWidth(right, width)];
+				}
+				if (middleWidth + rightWidth + 1 >= width) {
+					const gapWidth = Math.max(1, width - middleWidth - rightWidth);
+					return [modelLine, `${watchStatus}${" ".repeat(gapWidth)}${right}`];
+				}
+
+				// Try to fit left + watch + right
+				const availableForLeft = Math.max(
+					0,
+					width - middleWidth - rightWidth - 2,
 				);
-				const rightGap = Math.max(
+				const visibleLeft = truncateToWidth(left, availableForLeft);
+				const gapWidth = Math.max(
 					1,
-					width - leftWidth - leftGap - middleWidth - rightWidth,
+					width - visibleWidth(visibleLeft) - middleWidth - rightWidth - 1,
 				);
 				return [
-					`${left}${" ".repeat(leftGap)}${watchStatus}${" ".repeat(rightGap)}${right}`,
+					modelLine,
+					`${visibleLeft}${" ".repeat(gapWidth)}${watchStatus} ${right}`,
 				];
 			}
 
-			// If it doesn't fit, prioritize PR > watch > service
-			if (rightWidth >= width) return [truncateToWidth(right, width)];
-			if (middleWidth + rightWidth + 1 >= width) {
-				const gapWidth = Math.max(1, width - middleWidth - rightWidth);
-				return [`${watchStatus}${" ".repeat(gapWidth)}${right}`];
-			}
+			// Original two-column layout when no watch
+			const rightWidth = visibleWidth(right);
+			if (rightWidth >= width)
+				return [modelLine, truncateToWidth(right, width)];
 
-			// Try to fit left + watch + right
-			const availableForLeft = Math.max(
-				0,
-				width - middleWidth - rightWidth - 2,
-			);
-			const visibleLeft = truncateToWidth(left, availableForLeft);
+			const availableLeftWidth = Math.max(0, width - rightWidth - 1);
+			const visibleLeft = truncateToWidth(left, availableLeftWidth);
 			const gapWidth = Math.max(
 				1,
-				width - visibleWidth(visibleLeft) - middleWidth - rightWidth - 1,
+				width - visibleWidth(visibleLeft) - rightWidth,
 			);
-			return [`${visibleLeft}${" ".repeat(gapWidth)}${watchStatus} ${right}`];
-		}
-
-		// Original two-column layout when no watch
-		const rightWidth = visibleWidth(right);
-		if (rightWidth >= width) return [truncateToWidth(right, width)];
-
-		const availableLeftWidth = Math.max(0, width - rightWidth - 1);
-		const visibleLeft = truncateToWidth(left, availableLeftWidth);
-		const gapWidth = Math.max(
-			1,
-			width - visibleWidth(visibleLeft) - rightWidth,
-		);
-		return [`${visibleLeft}${" ".repeat(gapWidth)}${right}`];
-	},
-});
+			return [modelLine, `${visibleLeft}${" ".repeat(gapWidth)}${right}`];
+		},
+	});
+}
 
 const WATCH_SUBCOMMANDS = ["start", "status", "stop", "now"] as const;
 
@@ -245,7 +262,7 @@ function registerGithubLifecycle(
 	watchController: WatchControllerInstance,
 ): void {
 	pi.on("session_start", async (_event, ctx) => {
-		ctx.ui.setFooter(githubFooter);
+		ctx.ui.setFooter(createGithubFooter(ctx));
 		controller.restore(ctx);
 		controller.startTimer(ctx);
 		await controller.refresh(ctx, "session_start");
@@ -255,6 +272,14 @@ function registerGithubLifecycle(
 	// The caching logic will prevent redundant calls anyway.
 	pi.on("turn_end", async (_event, ctx) => {
 		void controller.refresh(ctx, "turn_end", ctx.signal).catch(() => undefined);
+	});
+
+	pi.on("agent_start", () => {
+		watchController.markAgentStarted();
+	});
+
+	pi.on("agent_end", () => {
+		watchController.markAgentEnded();
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
@@ -294,13 +319,37 @@ function registerGithubStatusCommands(
 	});
 }
 
+async function selectWatchModel(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	selector: string,
+): Promise<boolean> {
+	const separator = selector.indexOf("/");
+	if (separator <= 0 || separator === selector.length - 1) {
+		ctx.ui.notify("Use --model=<provider/model>.", "error");
+		return false;
+	}
+	const provider = selector.slice(0, separator);
+	const modelId = selector.slice(separator + 1);
+	const model = ctx.modelRegistry.find(provider, modelId);
+	if (!model) {
+		ctx.ui.notify(`Watch model ${selector} is not configured.`, "error");
+		return false;
+	}
+	if (!(await pi.setModel(model))) {
+		ctx.ui.notify(`Watch model ${selector} is unavailable.`, "error");
+		return false;
+	}
+	return true;
+}
+
 function registerWatchCommand(
 	pi: ExtensionAPI,
 	watchController: WatchControllerInstance,
 ): void {
 	pi.registerCommand("watch", {
 		description:
-			"Watch the current PR for blockers. Subcommands: start [--notify-only] [--local], status, stop, now.",
+			"Watch the current PR for blockers. Subcommands: start [--notify-only] [--local] [--model=<provider/model>], status, stop, now.",
 		getArgumentCompletions: watchCompletions,
 		handler: async (args, ctx) => {
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -310,9 +359,21 @@ function registerWatchCommand(
 			const notifyOnly = flags.includes("--notify-only");
 			const forceLocal =
 				flags.includes("--local") || flags.includes("--force-local");
+			const modelSelector = flags
+				.find((token) => token.startsWith("--model="))
+				?.slice(8);
 			switch (subcommand.toLowerCase()) {
 				case "start":
-					await watchController.start(ctx, { notifyOnly, forceLocal });
+					if (
+						modelSelector &&
+						!(await selectWatchModel(pi, ctx, modelSelector))
+					)
+						return;
+					await watchController.start(ctx, {
+						notifyOnly,
+						forceLocal,
+						model: modelSelector,
+					});
 					return;
 				case "status":
 					ctx.ui.notify(watchController.status(), "info");
@@ -325,7 +386,7 @@ function registerWatchCommand(
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /watch [start [--notify-only] [--local]|status|stop|now]",
+						"Usage: /watch [start [--notify-only] [--local] [--model=<provider/model>]|status|stop|now]",
 						"warning",
 					);
 			}
