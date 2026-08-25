@@ -282,6 +282,10 @@ function formatPrompt(
 					`Local model mode (--local): prefer local model execution for every spawned investigation or repair agent; when smart-model-run local selection is available, pass its local-only option and do not use remote/cloud fallbacks unless the user explicitly authorizes leaving local mode.`,
 				]
 			: []),
+		`Orchestration: use one focused subagent per independent operation or inspection, and one focused subagent per finding; never bundle independent operations, inspections, or findings into one subagent. The main thread assigns the exact operation and receives only a concise structured resolution/problem result from each subagent.`,
+		`Retry policy: each exact operation may have at most 3 total attempts, including retries and any prerequisite or follow-up command that is the same operation. Stop immediately on success and record each attempt and outcome; never run a fourth attempt or silently substitute a different operation.`,
+		`After 3 unsuccessful attempts, the subagent must report exactly \`BLOCKED / NEEDS_HUMAN_INFORMATION\` with attempts, concrete evidence, and the specific human information needed. It must never claim the operation or finding is resolved after exhaustion.`,
+		`Each subagent result must use only this concise structure: STATUS: RESOLVED or BLOCKED / NEEDS_HUMAN_INFORMATION; ATTEMPTS: <count>/3; EVIDENCE: <observed result>; HUMAN_INFORMATION_NEEDED: <specific missing information or NONE>.`,
 		`Use TDD for any fix path: write the smallest failing test first, make the smallest code change, then run the focused verification.`,
 		`If reference-app behavior matters, use the nlm CLI to inspect it before changing code.`,
 		`Spawn focused subagents only for the new items above.`,

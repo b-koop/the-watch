@@ -152,6 +152,20 @@ describe("createWatchController", () => {
 			expect.objectContaining({ customType: "watch-trigger" }),
 			{ triggerTurn: true },
 		);
+		expect(pi.sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining(
+					"one focused subagent per independent operation or inspection",
+				),
+			}),
+			{ triggerTurn: true },
+		);
+		expect(pi.sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining("BLOCKED / NEEDS_HUMAN_INFORMATION"),
+			}),
+			{ triggerTurn: true },
+		);
 		expect(ctx.ui.notify).toHaveBeenCalledWith(
 			"Watch detected 1 new item: blocking - pipeline; investigation queued.",
 			"warning",
