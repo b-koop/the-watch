@@ -65,7 +65,7 @@ tool available.
 ## Publish to npm
 
 Publishing is automatic for pushes to `main` through
-`.github/workflows/publish.yml`. The workflow installs dependencies, runs the
+`.github/workflows/release.yaml`. The workflow installs dependencies, runs the
 tests and package dry-run check, and reads the package name and version from
 `package.json`. It queries npm for that exact version first; if it is already
 published, the workflow skips publishing, tagging, and releasing.
@@ -75,7 +75,7 @@ For a new version, the workflow uses npm trusted publishing (OIDC) with
 `vX.Y.Z` tag from the triggering commit and publishes a GitHub Release with
 generated notes. The workflow's `npm-publish` environment and the npm trusted
 publisher must be configured for this repository and
-`.github/workflows/publish.yml` in npm. The package version in `package.json` is
+`.github/workflows/release.yaml` in npm. The package version in `package.json` is
 the single source for both the npm version and the generated release tag.
 
 The local `publish:otc` script remains available only as a manual OTP fallback:
