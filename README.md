@@ -220,11 +220,11 @@ pi -e ./extensions/pr-vette.ts -p "/vette 123 --comments-only --no-post --no-wat
 
 The accepted comment payload is a JSON array. Each item requires `title`,
 `severity` (`blocker`, `recommended`, or `note`), `codeSummary`, `what`, and
-`why`; `file` and positive-integer `line` are optional, as are `evidence` and
-`fixBoundary`. The shared renderer emits the stable severity label, title
-`details` block, and `## Code summary`, `## What`, `## Why`, plus optional
-`## Evidence` and `## Fix boundary` sections. The complete array is validated
-before the first post. Invalid JSON never makes a network call; valid comments
+`why`; `file` and positive-integer `line` are optional, as are `evidence`,
+`testCode`, and `fixBoundary`. The shared renderer emits the stable severity
+label, title `details` block, and `## Code summary`, `## What`, `## Why`, plus
+optional `## Evidence`, `## Regression test`, and `## Fix boundary` sections.
+The complete array is validated before the first post. Invalid JSON never makes a network call; valid comments
 fall back from exact line to file-level to general PR comments and report each
 fallback. The workflow posts ordinary comments only and never submits review
 decisions, edits source, commits, or pushes.
@@ -248,6 +248,14 @@ The parent session deduplicates and verifies findings before acting.
   each one re-reads the whole bundle. A Haiku lane is promoted to Sonnet when the
   bundle exceeds 400K characters, which would outgrow its context window. Pass
   `--model haiku|sonnet|opus|fable` to `vette-prepare` to override all three.
+- **Validating tests** — whenever a review builds a test that demonstrates a
+  finding, the test's complete source goes in that comment's `testCode` field
+  and the renderer posts it as a fenced `## Regression test` section; the
+  command and its outcome stay in `evidence`, which is not rendered as code. A
+  blocker that arrives with a failing test is much harder to wave away than a
+  paragraph describing one. Test source is never invented for a test that was
+  not actually run, and `--comments-only` CI runs write no tests at all, since
+  they may not touch the tree.
 - **Base branch** — a PR is reviewed against its own base. Without a PR, the
   base is the branch the head was actually cut from: `origin/dev`,
   `origin/develop`, and `origin/development` are checked first, then whatever

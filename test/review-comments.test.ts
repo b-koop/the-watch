@@ -52,7 +52,10 @@ describe("review comment JSON contract", () => {
 		expect(body).toContain("## What");
 		expect(body).toContain("## Why");
 		expect(body).toContain("## Regression test");
-		expect(body).toContain('it("rejects stale writes"');
+		// The source must land inside a fence, not as loose prose.
+		expect(body).toMatch(
+			/## Regression test\n```\nit\("rejects stale writes".*\n```/,
+		);
 		expect(body).not.toContain("## Evidence");
 		expect(body).not.toContain("## Fix boundary");
 	});

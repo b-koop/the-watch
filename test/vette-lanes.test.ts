@@ -12,6 +12,14 @@ const source = readFileSync(
 	new URL("../workflows/vette-lanes.js", import.meta.url),
 	"utf8",
 );
+const skill = readFileSync(
+	new URL("../skills/vette/SKILL.md", import.meta.url),
+	"utf8",
+);
+const modes = readFileSync(
+	new URL("../skills/vette/references/modes.md", import.meta.url),
+	"utf8",
+);
 
 /**
  * The workflow runs in a sandbox with no module access, so its helpers cannot
@@ -426,5 +434,49 @@ describe("cache priming", () => {
 
 	it("replays the primer's result rather than reviewing it twice", () => {
 		expect(source).toContain("primed.get(reviewer.name) ?? reviewLane(reviewer)");
+	});
+});
+
+/**
+ * A validating test only reaches the reviewer if its source rides along in the
+ * comment. Synthesis runs before any test is written, so the field has to be
+ * left for the parent turn to fill — and must never be filled with source that
+ * was not actually run.
+ */
+describe("validating test source in comments", () => {
+	it("keeps testCode in the comment schema for the parent to fill", () => {
+		const schema = helpers.COMMENTS_SCHEMA as {
+			properties: {
+				comments: { items: { properties: Record<string, unknown> } };
+			};
+		};
+		expect(schema.properties.comments.items.properties).toHaveProperty(
+			"testCode",
+		);
+	});
+
+	it("tells synthesis to leave testCode alone rather than invent source", () => {
+		expect(source).toContain("Leave testCode unset");
+		expect(source).toContain("Never invent test source here.");
+	});
+
+	it("makes the skill attach real test source before posting", () => {
+		expect(skill).toContain("### Validating tests");
+		expect(skill).toContain("Add `testCode` to");
+		expect(skill).toContain("Never invent test source.");
+	});
+
+	it("requires test source in comment mode and forbids it in CI", () => {
+		const [commentMode, commentsOnly] = [
+			modes.slice(
+				modes.indexOf("## comment (default)"),
+				modes.indexOf("## dry run"),
+			),
+			modes.slice(modes.indexOf("## comments-only")),
+		];
+		expect(commentMode).toContain("`testCode`");
+		expect(commentMode).toContain("Never write `testCode` for a test you did");
+		expect(commentsOnly).toContain("create or modify tests");
+		expect(commentsOnly).toContain("carries no `testCode`");
 	});
 });

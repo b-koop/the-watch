@@ -100,13 +100,38 @@ See [references/modes.md](references/modes.md) for the contract each mode must
 hold to, and [references/comment-contract.md](references/comment-contract.md)
 for the comment payload schema.
 
+### Validating tests
+
+A blocker that arrives with a failing test proving it is much harder to wave
+away than a paragraph describing it. For each confirmed finding — blockers
+first — build the smallest unit, regression, or integration test that
+demonstrates the behavior, run it, and confirm it fails for the stated reason.
+
+The workflow builds its `comments` array during synthesis, before any of this
+happens, so no test source will be in what it hands back. **Add `testCode` to
+the matching comment item yourself before passing the array to the poster.** It
+takes the complete source of the test — not a fragment, not a path to a file the
+reviewer cannot open. Keep only the command and its outcome in `evidence`: the
+renderer gives `testCode` its own fenced `## Regression test` section, and
+`evidence` is not rendered as code.
+
+Never invent test source. If a finding cannot be proven by a test you actually
+ran — it needs infrastructure, network, or a fixture you do not have — leave
+`testCode` off that item and say so in `evidence`. A fabricated test is worse
+than none, because it reads as verification that never happened.
+
+| Mode | Validating tests |
+| --- | --- |
+| **comment** | Build them, post the source in `testCode`, then delete temporary test files. |
+| **dry run** | Same, so the rendered payload can be checked before a real run. |
+| **repair** | Build them and keep them — the test is the fix's proof. |
+| **comments-only** | **Never.** A CI run may not create or modify any file. |
+
 ### Posting
 
 The poster is the only sanctioned path to GitHub. It validates the entire array
 before the first network call, then falls back exact line → file → general
-placement per comment. Whenever a test is written for a finding, its complete
-source must be included in that comment item's `testCode` field; keep only the
-command and outcome in `evidence`.
+placement per comment.
 
 ```bash
 node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts" --pr <n> --stdin <<'JSON'
@@ -123,12 +148,14 @@ exact Markdown that would be posted and makes no network call.
 ### Repairing
 
 Apply the smallest change that fixes each confirmed finding, and add or update a
-focused test where one is practical. Do not commit, do not push, and do not post
-comments in this mode. Report what you fixed and what you could not.
+focused test where one is practical — here the test stays in the tree rather
+than going into `testCode`, since nothing is being posted. Do not commit, do not
+push, and do not post comments in this mode. Report what you fixed and what you
+could not.
 
 ## Reporting
 
 Close with counts: lanes run, findings raised, dropped as ungrounded, refuted
-during verification, verified, and posted or fixed. If `droppedUngrounded` is
-high relative to findings raised, say so — it means the lanes are drifting off
-the diff and the run deserves a second look.
+during verification, verified, how many carry a validating test, and posted or
+fixed. If `droppedUngrounded` is high relative to findings raised, say so — it
+means the lanes are drifting off the diff and the run deserves a second look.
