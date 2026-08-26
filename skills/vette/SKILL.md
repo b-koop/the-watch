@@ -41,9 +41,11 @@ disk (a file read arrives as a tool result and shares no prefix).
 The manifest also assigns each lane a model tier, and carries `verifyModel` and
 `synthesisModel` for the other two stages. Nothing inherits the session model:
 the fan-out is where a run's tokens go, and an Opus session would bill every
-lane at 5x Haiku's rate for work that does not need it. All lanes default to `haiku` for lower-cost execution, and `--model <tier>` overrides
-all three when a run needs more firepower. Pass explicit manifest tiers through as
-they come; do not substitute your own.
+lane at 5x Haiku's rate for work that does not need it. Every lane runs on
+`haiku`; the adversarial verifiers and the synthesis call stay on `sonnet`,
+because the verify gate — not lane firepower — is what keeps wrong findings out.
+`--model <tier>` overrides all three at once when a run needs more. Pass explicit
+manifest tiers through as they come; do not substitute your own.
 
 Two failures are deliberate and must **not** be worked around:
 

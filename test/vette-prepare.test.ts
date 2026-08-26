@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	HAIKU_BUNDLE_CHAR_LIMIT,
 	laneModel,
+	SYNTHESIS_MODEL,
+	VERIFY_MODEL,
 	parsePrepareArgs,
 	prepare,
 } from "../scripts/vette-prepare.ts";
@@ -128,18 +130,26 @@ describe("laneModel", () => {
 		expect(laneModel("maintainability", 1_000)).toBe("haiku");
 	});
 
-	it("keeps the analytic and highest-risk lanes on sonnet", () => {
-		expect(laneModel("security-data", 1_000)).toBe("sonnet");
-		expect(laneModel("async-state", 1_000)).toBe("sonnet");
-		expect(laneModel("correctness", 1_000)).toBe("sonnet");
+	it("runs the analytic and highest-risk lanes on the cheapest tier too", () => {
+		expect(laneModel("security-data", 1_000)).toBe("haiku");
+		expect(laneModel("async-state", 1_000)).toBe("haiku");
+		expect(laneModel("correctness", 1_000)).toBe("haiku");
 	});
 
 	it("never inherits the session model for a repository-local lane", () => {
-		expect(laneModel("some-custom-house-lane", 1_000)).toBe("sonnet");
+		expect(laneModel("some-custom-house-lane", 1_000)).toBe("haiku");
+	});
+
+	it("keeps the verify and synthesis gate above the lane tier", () => {
+		expect(VERIFY_MODEL).toBe("sonnet");
+		expect(SYNTHESIS_MODEL).toBe("sonnet");
 	});
 
 	it("promotes haiku lanes when the bundle outgrows its context window", () => {
 		expect(laneModel("naming", HAIKU_BUNDLE_CHAR_LIMIT + 1)).toBe("sonnet");
+		expect(laneModel("correctness", HAIKU_BUNDLE_CHAR_LIMIT + 1)).toBe(
+			"sonnet",
+		);
 	});
 });
 

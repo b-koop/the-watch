@@ -40,31 +40,38 @@ export const LANE_EFFORT: Record<string, string> = {
  * model, which on an Opus session bills at 5x Haiku's input rate for work that
  * does not need it.
  *
- * `haiku` covers the pattern-matching lanes (the ones already on `low` effort);
- * everything else, including the two highest-risk lanes, gets `sonnet`. Nothing
- * runs on `opus` by default — the adversarial verify pass, not lane firepower,
- * is what keeps wrong findings out.
+ * Every lane runs on `haiku`. Lane firepower is not what keeps wrong findings
+ * out — the adversarial verify pass is, and that stays on `sonnet`. Raising a
+ * lane's recall costs the bundle re-read at the higher rate on every lane it is
+ * applied to, so the cheap-lanes/expensive-gate split is the better trade. Pin
+ * an individual lane higher here when a run proves it needs more; `--model
+ * <tier>` raises the whole run at once.
  */
 export const LANE_MODEL: Record<string, string> = {
 	naming: "haiku",
 	"test-quality": "haiku",
 	"test-scenarios": "haiku",
 	maintainability: "haiku",
-	"security-data": "sonnet",
-	"async-state": "sonnet",
-	correctness: "sonnet",
-	"error-handling": "sonnet",
-	contracts: "sonnet",
-	requirements: "sonnet",
-	"behavior-specs": "sonnet",
-	typescript: "sonnet",
-	javascript: "sonnet",
+	"security-data": "haiku",
+	"async-state": "haiku",
+	correctness: "haiku",
+	"error-handling": "haiku",
+	contracts: "haiku",
+	requirements: "haiku",
+	"behavior-specs": "haiku",
+	typescript: "haiku",
+	javascript: "haiku",
 };
 
 /** Lanes absent from `LANE_MODEL` — including repository-local ones. */
-export const DEFAULT_LANE_MODEL = "sonnet";
+export const DEFAULT_LANE_MODEL = "haiku";
 
-/** Refuting a finding is the quality gate; it does not go on the cheapest tier. */
+/**
+ * Refuting a finding is the quality gate, and the only stage that reads real
+ * source rather than the bundle. It does not go on the cheapest tier — with
+ * every lane on haiku, this pass is what stands between a plausible-sounding
+ * lane finding and a posted comment.
+ */
 export const VERIFY_MODEL = "sonnet";
 
 /** One call per run, and it writes the comment payload. */

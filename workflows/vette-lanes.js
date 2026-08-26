@@ -196,9 +196,13 @@ function verifyPrompt(finding, reviewer, args) {
 // Every agent here names its own tier. Inheriting the session model would put
 // the whole fan-out on whatever the parent happens to be running — Opus bills
 // input at 5x Haiku and output at 5x, for lane work that does not need it.
+//
+// The manifest normally supplies all three. These fallbacks mirror its defaults
+// for a hand-rolled invocation: lanes cheap, and the verify/synthesis gate a
+// tier up, since that gate is what a haiku fan-out leans on.
 const DEFAULT_LANE_MODEL = 'haiku'
-const verifyModel = args.verifyModel ?? 'haiku'
-const synthesisModel = args.synthesisModel ?? 'haiku'
+const verifyModel = args.verifyModel ?? 'sonnet'
+const synthesisModel = args.synthesisModel ?? 'sonnet'
 
 const secondCleanCheck = new Set(args.secondCleanCheck ?? [])
 let droppedUngrounded = 0

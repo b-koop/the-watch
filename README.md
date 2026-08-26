@@ -241,11 +241,12 @@ contracts, async/state, naming, maintainability, requirements, and feature
 behavior specs.
 The parent session deduplicates and verifies findings before acting.
 
-- **Model tiers** — lane agents never inherit the session model. The
-  pattern-matching lanes (naming, test quality, test scenarios,
-  maintainability) run on Haiku; every other lane, the adversarial verifiers,
-  and the synthesis call run on Sonnet. Nothing is on an Opus tier by default —
-  verification, not lane firepower, is what keeps wrong findings out. Pass
+- **Model tiers** — lane agents never inherit the session model. Every lane runs
+  on Haiku; the adversarial verifiers and the synthesis call run on Sonnet.
+  Nothing is on an Opus tier by default — verification, not lane firepower, is
+  what keeps wrong findings out, and the lanes are where a run's tokens go since
+  each one re-reads the whole bundle. A Haiku lane is promoted to Sonnet when the
+  bundle exceeds 400K characters, which would outgrow its context window. Pass
   `--model haiku|sonnet|opus|fable` to `vette-prepare` to override all three.
 - **Base branch** — a PR is reviewed against its own base. Without a PR, the
   base is the branch the head was actually cut from: `origin/dev`,

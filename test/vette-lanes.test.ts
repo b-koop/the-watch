@@ -281,9 +281,9 @@ describe("lane effort mapping", () => {
 		expect(SECOND_CLEAN_CHECK).toEqual(["security-data", "async-state"]);
 	});
 
-	it("puts the low-effort lanes on the cheapest tier", () => {
-		for (const [lane, effort] of Object.entries(LANE_EFFORT)) {
-			if (effort === "low") expect(LANE_MODEL[lane]).toBe("haiku");
+	it("puts every lane on the cheapest tier regardless of effort", () => {
+		for (const lane of Object.keys(LANE_EFFORT)) {
+			expect(LANE_MODEL[lane]).toBe("haiku");
 		}
 	});
 
@@ -303,8 +303,8 @@ describe("workflow model selection", () => {
 
 	it("takes its tiers from the manifest with a non-session fallback", () => {
 		expect(source).toContain("model: reviewer.model ?? DEFAULT_LANE_MODEL");
-		expect(source).toContain("args.verifyModel ?? 'haiku'");
-		expect(source).toContain("args.synthesisModel ?? 'haiku'");
+		expect(source).toContain("args.verifyModel ?? 'sonnet'");
+		expect(source).toContain("args.synthesisModel ?? 'sonnet'");
 	});
 });
 
