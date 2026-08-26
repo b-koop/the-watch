@@ -783,7 +783,7 @@ function reviewCommentPostingContract(): string {
 export function reviewCommentTemplateContract(): string {
 	return `Review comment templates (shared JSON contract):
 - Synthesis must emit a JSON array; every item requires title, severity (blocker|recommended|note), codeSummary, what, and why. file and line are optional; line is a positive integer and requires file.
-- evidence, testCode, and fixBoundary are optional. Whenever a focused or regression test is created, include its complete source in testCode; never leave test code only in evidence or the final report. Pass the complete array to scripts/post-vette-comments.ts; it validates before posting and renders the fixed section order: severity label, title details block, Code summary, What, Why, optional Evidence, optional Regression test, optional Fix boundary.
+- evidence, testCode, and fixBoundary are optional. Whenever a focused or regression test is created, include its complete source in testCode; never leave test code only in evidence or the final report. Pass the complete array to \${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts; it validates before posting and renders the fixed section order: severity label, title details block, Code summary, What, Why, optional Evidence, optional Regression test, optional Fix boundary.
 - Naming-only suggest comments remain the explicit exception.
 - Use the templates below for posted comments. Keep headings and labels stable so the PR thread is scannable.
 - Summary text must be one sentence, behavior-first, and plainly explain what was found and why it is a bug. Keep verification details inside the expanded panel.

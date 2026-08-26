@@ -2844,7 +2844,7 @@ export function formatVetteBetaSynthesisPrompt(
 		toolInstruction =
 			"- Comment-only mode: use only ordinary inline/general comment endpoints; never call a review-decision endpoint or send APPROVE, REQUEST_CHANGES, or equivalent payloads.";
 		if (hasPrTarget) {
-			actionInstruction += ` After verification, produce the strict JSON comment array and pass it to scripts/post-vette-comments.ts; do not invent Markdown or call GitHub endpoints independently.`;
+			actionInstruction += ` After verification, produce the strict JSON comment array and pass it to \${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts; do not invent Markdown or call GitHub endpoints independently.`;
 			inlinePostInstruction =
 				"- The shared JSON parser/poster performs the only posting pass and handles exact-line, file-level, and general fallbacks; never use review-decision endpoints.";
 		}
@@ -2887,7 +2887,7 @@ export function formatVetteBetaSynthesisPrompt(
 			toolInstruction =
 				"- Dry run (--no-post): prepare comment-ready markdown only; do not run any posting commands.";
 		} else if (hasPrTarget) {
-			actionInstruction = `After verification is complete, produce the strict JSON comment array and pass it to scripts/post-vette-comments.ts for one final posting pass. Do not invent Markdown or call GitHub endpoints independently. post verified findings to ${run.target?.prUrl} only through that boundary.`;
+			actionInstruction = `After verification is complete, produce the strict JSON comment array and pass it to \${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts for one final posting pass. Do not invent Markdown or call GitHub endpoints independently. post verified findings to ${run.target?.prUrl} only through that boundary.`;
 			toolInstruction =
 				"- Use the shared JSON parser/poster only; it validates the complete array before posting and records fallback results.";
 			inlinePostInstruction =
@@ -2973,7 +2973,7 @@ export function formatVetteBetaSynthesisPrompt(
 		"PR comment style contract: the shared renderer owns Markdown formatting.",
 		"- Return a JSON array only. Each item requires title, severity (blocker|recommended|note), codeSummary, what, and why; file and line are optional, and line must be a positive integer when present.",
 		"- evidence, testCode, and fixBoundary are optional. Whenever a focused or regression test is created, include its complete source in testCode; never leave test code only in evidence or the final report. Preserve verification details in evidence and the smallest intended change in fixBoundary.",
-		"- Pass the complete JSON string to scripts/post-vette-comments.ts; the shared parser validates the entire array before posting.",
+		"- Pass the complete JSON string to ${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts; the shared parser validates the entire array before posting.",
 		"- The shared renderer provides stable severity labels and headings: Code summary, What, Why, and optional Evidence/Regression test/Fix boundary.",
 		"- Renderer compatibility labels: 🔴 **Blocker**, 🟡 **Recommended**, 🔵 **Note**; details summaries remain behavior-first; do not overload the summary.",
 		"- Renderer: always leave one blank line after the closing </summary> tag.",
