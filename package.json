@@ -1,6 +1,6 @@
 {
   "name": "@ai-local/watch",
-  "version": "1.2.0",
+  "version": "1.1.0",
   "description": "Pi package that watches pull requests with PR-aware /vette, /pr, /watch, and /peek commands plus GitHub status diagnostics.",
   "type": "module",
   "license": "MIT",

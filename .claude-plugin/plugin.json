@@ -1,7 +1,7 @@
 {
   "name": "watch",
   "description": "PR-aware /vette review: fans out per-topic reviewer lanes over a pull request diff, verifies every finding against real code, and posts only what survives.",
-  "version": "1.2.0",
+  "version": "1.1.0",
   "author": { "name": "b-koop" },
   "homepage": "https://github.com/ai-local/watch#readme",
   "repository": "https://github.com/ai-local/watch",
