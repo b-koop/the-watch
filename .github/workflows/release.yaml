@@ -74,7 +74,7 @@ jobs:
             || "$PUBLISHED_VERSION" == "$PACKAGE_VERSION" ]]; then
             echo "Already published:"
             echo "${PACKAGE_NAME}@${PACKAGE_VERSION}"
-            echo "skipping publish, tag, and release."
+            echo "skipping publish; ensuring the release tag and release exist."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "Version ${PACKAGE_NAME}@${PACKAGE_VERSION} is not published;"
@@ -97,43 +97,40 @@ jobs:
             exit 1
           fi
 
-          if git ls-remote --exit-code --refs origin \
-            "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Tag ${RELEASE_TAG} already exists on origin;" >&2
-            echo "refusing to move or overwrite it." >&2
-            exit 1
-          fi
-
       - name: Publish package to npm
         if: steps.published.outputs.exists != 'true'
         run: npm publish --provenance --access public
 
       - name: Create and push release tag
-        if: steps.published.outputs.exists != 'true'
         env:
           RELEASE_TAG: ${{ steps.package.outputs.tag }}
           RELEASE_SHA: ${{ github.sha }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           if git ls-remote --exit-code --refs origin \
             "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Tag ${RELEASE_TAG} appeared on origin;" >&2
-            echo "refusing to move or overwrite it." >&2
-            exit 1
+            echo "Tag ${RELEASE_TAG} already exists; leaving it unchanged."
+          else
+            git tag --annotate "$RELEASE_TAG" "$RELEASE_SHA" \
+              --message "Release $RELEASE_TAG"
+            git -c "http.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+              push origin "refs/tags/${RELEASE_TAG}"
           fi
 
-          git tag --annotate "$RELEASE_TAG" "$RELEASE_SHA" \
-            --message "Release $RELEASE_TAG"
-          git -c "http.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
-            push origin "refs/tags/${RELEASE_TAG}"
-
       - name: Create published GitHub Release
-        if: steps.published.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.package.outputs.tag }}
-        run: >-
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
-          --title "$RELEASE_TAG" --generate-notes --verify-tag
+        run: |
+          if gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; leaving it unchanged."
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_TAG" --generate-notes --verify-tag
+          fi
