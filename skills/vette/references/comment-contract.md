@@ -1,6 +1,6 @@
 # Comment payload contract
 
-`scripts/post-vette-comments.ts` validates the **entire** array before it makes
+`${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts` validates the **entire** array before it makes
 the first network call. One malformed item means nothing is posted. Unknown
 fields are rejected outright, so do not invent any.
 

@@ -141,7 +141,7 @@ verifier per finding, a real PR exceeds the usual 15-agent guideline by design.
 | comments-only | `--comments-only` (CI) | Post comments and nothing else |
 
 `--comments-only` and `self` are mutually exclusive. Posting always goes through
-`scripts/post-vette-comments.ts` — never a hand-written `gh api` call — which
+`${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts` — never a hand-written `gh api` call — which
 validates the whole array before the first network call and falls back exact
 line → file → general per comment. Repairs happen in the main turn rather than
 in workflow agents, because parallel agents editing one working tree conflict.

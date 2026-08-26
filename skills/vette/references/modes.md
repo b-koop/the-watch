@@ -6,7 +6,7 @@ findings afterwards.
 ## comment (default)
 
 Someone else's PR. Post the verified comments through
-`scripts/post-vette-comments.ts` and report the counts.
+`${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts` and report the counts.
 
 Do not edit source, commit, push, or submit a review decision. Ordinary
 inline/general comments only — a review decision (approve / request changes) is
