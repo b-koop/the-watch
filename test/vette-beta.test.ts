@@ -1301,6 +1301,9 @@ describe("vette beta review integration", () => {
 		expect(prompt).toContain(
 			"Put long logs inside evidence; provide repro/test source through testCode",
 		);
+		expect(prompt).toContain(
+			"If a test is written, include its complete source in the comment item's testCode field",
+		);
 		expect(prompt).toContain("each finding in its own nested <details> block");
 		expect(prompt).toContain("<<<UNTRUSTED_CONTENT_START>>>");
 		expect(prompt).toContain("<<<UNTRUSTED_CONTENT_END>>>");

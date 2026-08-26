@@ -37,10 +37,7 @@ import {
 	loadVetteReviewSections,
 } from "./vette-review.ts";
 import { discoverReviewers } from "./vette-reviewers.ts";
-import {
-	resolveBaseBranch,
-	type ResolvedBaseBranch,
-} from "./base-branch.ts";
+import { resolveBaseBranch, type ResolvedBaseBranch } from "./base-branch.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -320,14 +317,13 @@ async function getOriginRemoteUrl(cwd: string): Promise<string> {
 }
 
 async function resolveDraftPrContext(cwd: string): Promise<DraftPrContext> {
-	const [branch, base, identity, dirtyStatus, remoteUrl] =
-		await Promise.all([
-			getCurrentBranch(cwd),
-			resolveDefaultBase(cwd),
-			getLocalGitIdentity(cwd),
-			getDirtyStatus(cwd),
-			getOriginRemoteUrl(cwd),
-		]);
+	const [branch, base, identity, dirtyStatus, remoteUrl] = await Promise.all([
+		getCurrentBranch(cwd),
+		resolveDefaultBase(cwd),
+		getLocalGitIdentity(cwd),
+		getDirtyStatus(cwd),
+		getOriginRemoteUrl(cwd),
+	]);
 
 	return {
 		branch,
@@ -764,7 +760,7 @@ function reviewCommentTestContract(): string {
 - For each reproducible finding, build the smallest temporary test that demonstrates the behavior, run the focused test command, and verify it fails for the expected reason on the PR branch.
 - If the focused test command fails after the exact-command retry, run one second dependency install attempt, then run the repository build/rebuild command, then rerun the focused test before preparing or posting any comments.
 - Clean up temporary test files unless the user explicitly asked to commit tests; keep the exact test code and failing command output in the review evidence.
-- Put the relevant test code directly in the associated GitHub review comment body, along with the command that proved it failed as expected, before posting the verified comment.
+- If any focused, regression, or repro test is written, include its complete source in the associated JSON comment testCode field; include only the command and outcome in evidence. Never omit the test source or leave it only in a local file/evidence. The poster renders testCode as the Regression test section before posting.
 - If a verified finding cannot be practically reproduced with a unit/regression test, classify it as untestable and preserve the best available evidence plus the reason no focused failing test is practical.`;
 }
 

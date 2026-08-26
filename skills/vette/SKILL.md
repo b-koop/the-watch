@@ -104,7 +104,9 @@ for the comment payload schema.
 
 The poster is the only sanctioned path to GitHub. It validates the entire array
 before the first network call, then falls back exact line → file → general
-placement per comment:
+placement per comment. Whenever a test is written for a finding, its complete
+source must be included in that comment item's `testCode` field; keep only the
+command and outcome in `evidence`.
 
 ```bash
 node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts" --pr <n> --stdin <<'JSON'

@@ -2859,7 +2859,7 @@ export function formatVetteBetaSynthesisPrompt(
 		toolInstruction =
 			"- Use your shell/bash tool to run focused test commands and apply fixes.";
 		phaseFourInstruction =
-			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
+			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. If a test is written, include its complete source in the comment item's testCode field and put only the command/output in evidence; never omit the test source. Then clean up temporary test files unless asked otherwise.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, fixed, still failing, and blocked items.";
 	} else if (isDocMode) {
@@ -2878,7 +2878,7 @@ export function formatVetteBetaSynthesisPrompt(
 	} else {
 		modeLabel = "external/comment review";
 		phaseFourInstruction =
-			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. For reproducible issues, include the exact failing test code and command output in the evidence, then clean up temporary test files unless asked otherwise.";
+			"4. For each remaining finding, especially blockers, try to build the smallest validating unit/regression/integration test that proves the behavior. If a test is written, include its complete source in the comment item's testCode field and put only the command/output in evidence; never omit the test source. Then clean up temporary test files unless asked otherwise.";
 		finishInstruction =
 			"6. Finish with counts for candidates, duplicates, rejected, verified, posted/comment-ready, and blocked items.";
 		if (noPost) {
