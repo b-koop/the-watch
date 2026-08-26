@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	postReviewComments,
 	parseReviewComments,
@@ -36,6 +38,8 @@ type CliArgs = {
 	dryRun: boolean;
 	/** The commit the review actually read, from the prepare manifest. */
 	headSha?: string;
+	/** Where prepare wrote its run sidecar, if not the default location. */
+	runDir?: string;
 };
 
 export function parsePostCommentArgs(argv: string[]): CliArgs {
@@ -46,6 +50,7 @@ export function parsePostCommentArgs(argv: string[]): CliArgs {
 		else if (token === "--json") result.json = argv[++i];
 		else if (token === "--file") result.file = argv[++i];
 		else if (token === "--head-sha") result.headSha = argv[++i];
+		else if (token === "--run-dir") result.runDir = argv[++i];
 		else if (token === "--stdin") result.stdin = true;
 		else if (token === "--dry-run" || token === "--validate")
 			result.dryRun = true;
@@ -130,9 +135,42 @@ function repositoryFromSelector(selector: string): string | undefined {
 	}
 }
 
+/**
+ * Mirrors `slug` in vette-prepare.ts, which derives the default run directory
+ * from the review label. Kept in step with it so the poster can find the run
+ * sidecar without being told where it is.
+ */
+function slug(value: string): string {
+	return (
+		value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "worktree"
+	);
+}
+
+/**
+ * The commit the review actually read. Falling back to the PR's current head is
+ * a last resort: a push between prepare and post would anchor findings to code
+ * no lane looked at.
+ */
+async function discoverReviewedCommit(
+	pullRequest: number,
+	runDir?: string,
+): Promise<string | undefined> {
+	const dir = runDir ?? join(tmpdir(), "claude-vette", slug(`PR #${pullRequest}`));
+	try {
+		const raw = await readFile(join(dir, "run.json"), "utf8");
+		const run = JSON.parse(raw) as { prNumber?: number; headSha?: string };
+		// Guard against a sidecar left by a different pull request.
+		if (run.prNumber !== pullRequest) return undefined;
+		return run.headSha;
+	} catch {
+		return undefined;
+	}
+}
+
 async function resolveMetadata(
 	selector: string,
 	headSha?: string,
+	runDir?: string,
 ): Promise<ReviewCommentPostMetadata> {
 	let prResult: { stdout: string };
 	try {
@@ -170,11 +208,14 @@ async function resolveMetadata(
 			);
 		}
 	}
-	return parsePullRequestMetadata(
-		String(prResult.stdout),
-		repository ?? "",
-		headSha,
-	);
+	const base = parsePullRequestMetadata(String(prResult.stdout), repository ?? "");
+	const reviewed =
+		headSha ?? (await discoverReviewedCommit(base.pullRequest, runDir));
+	if (!reviewed || reviewed === base.commitId) return base;
+	// Anchor to what was reviewed, but keep the current head available: if the
+	// branch was force-pushed the reviewed commit may no longer be reachable
+	// from the PR, and every inline placement would be rejected.
+	return { ...base, commitId: reviewed, fallbackCommitId: base.commitId };
 }
 
 export async function runPostVetteComments(
@@ -207,7 +248,11 @@ export async function runPostVetteComments(
 		}
 		if (!args.selector)
 			throw new Error("A pull-request selector is required for posting");
-		const metadata = await resolveMetadata(args.selector, args.headSha);
+		const metadata = await resolveMetadata(
+			args.selector,
+			args.headSha,
+			args.runDir,
+		);
 		const results = await postReviewComments(comments, metadata);
 		process.stdout.write(JSON.stringify({ metadata, results }, null, 2) + "\n");
 		if (!results.every((result) => result.ok)) {

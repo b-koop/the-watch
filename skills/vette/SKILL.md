@@ -151,14 +151,18 @@ before the first network call, then falls back exact line → file → general
 placement per comment.
 
 ```bash
-node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts" --pr <n> --head-sha <manifest.headSha> --stdin <<'JSON'
+node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts" --pr <n> --stdin <<'JSON'
 [ ...the comments array... ]
 JSON
 ```
 
-Pass `--head-sha` whenever the manifest has one. It anchors every comment to the
-commit the lanes actually read; without it the poster re-queries the PR head, and
-anything pushed since silently retargets the comments.
+Comments are anchored to the commit the lanes actually read, not to whatever the
+PR head is now. The poster finds that commit itself from the run sidecar prepare
+left behind, so there is nothing to pass. Override with `--head-sha <sha>` only
+to anchor somewhere else deliberately, or `--run-dir <dir>` when prepare was
+given a non-default `--run-dir`. If the branch was force-pushed and the reviewed
+commit is gone, the poster retries on the current head and records that in the
+comment's `fallbackReasons` rather than silently dropping the inline anchor.
 
 Never call `gh api` yourself to post a finding, and never hand-write the
 Markdown — the renderer owns formatting.

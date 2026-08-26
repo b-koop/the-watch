@@ -35,6 +35,12 @@ export type ReviewCommentPostMetadata = {
 	repository: string;
 	pullRequest: number;
 	commitId: string;
+	/**
+	 * The PR's current head, used only if `commitId` is rejected. A force-push
+	 * between review and post can orphan the reviewed commit, and every inline
+	 * placement would then fail down to a general comment.
+	 */
+	fallbackCommitId?: string;
 };
 
 export type ReviewCommentExecutor = (
@@ -259,6 +265,29 @@ export async function postReviewComments(
 				break;
 			} catch (error) {
 				lastError = error instanceof Error ? error.message : String(error);
+				// The reviewed commit can be orphaned by a force-push, which
+				// rejects every inline placement. Retry this same placement on
+				// the current head before giving up the anchor entirely — a
+				// comment one commit late still beats a general comment.
+				if (location !== "general" && metadata.fallbackCommitId) {
+					try {
+						const url = await postWith(
+							executor,
+							{ ...metadata, commitId: metadata.fallbackCommitId },
+							body,
+							location,
+							comment,
+						);
+						fallbackReasons.push(
+							`${location} placement retried on ${metadata.fallbackCommitId} after the reviewed commit was rejected: ${lastError}`,
+						);
+						results.push({ index, location, fallbackReasons, ok: true, url });
+						lastError = "";
+						break;
+					} catch {
+						// Fall through to the next placement.
+					}
+				}
 				if (location !== "general")
 					fallbackReasons.push(`${location} placement rejected: ${lastError}`);
 			}

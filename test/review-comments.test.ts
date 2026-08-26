@@ -146,6 +146,56 @@ describe("post-vette-comments PR metadata", () => {
 	});
 });
 
+describe("force-pushed reviewed commit", () => {
+	const comment = {
+		severity: "blocker",
+		title: "t",
+		file: "a.ts",
+		line: 3,
+		codeSummary: "c",
+		what: "w",
+		why: "y",
+	};
+
+	it("keeps the inline anchor by retrying on the current head", async () => {
+		// A force-push between review and post orphans the reviewed commit and
+		// rejects every inline placement. Degrading straight to a general
+		// comment would lose the anchor for the whole run.
+		const executor = vi.fn(async (_cmd: string, args: string[]) => {
+			if (args.join(" ").includes("commit_id=reviewed"))
+				throw new Error("422 commit_id is not part of the pull request");
+			return { stdout: JSON.stringify({ html_url: "u" }), stderr: "" };
+		});
+		const [result] = await postReviewComments(
+			parseReviewComments(JSON.stringify([comment])),
+			{
+				pullRequest: 1,
+				commitId: "reviewed",
+				fallbackCommitId: "current",
+				repository: "o/r",
+			},
+			executor as never,
+		);
+
+		expect(result).toMatchObject({ ok: true, location: "line" });
+		expect(result.fallbackReasons.join(" ")).toContain("retried on current");
+	});
+
+	it("does not retry when there is no newer head to fall back to", async () => {
+		const executor = vi.fn(async () => {
+			throw new Error("422 rejected");
+		});
+		const [result] = await postReviewComments(
+			parseReviewComments(JSON.stringify([comment])),
+			{ pullRequest: 1, commitId: "reviewed", repository: "o/r" },
+			executor as never,
+		);
+
+		expect(result.ok).toBe(false);
+		expect(result.fallbackReasons.join(" ")).not.toContain("retried");
+	});
+});
+
 describe("post-vette-comments CLI", () => {
 	it("accepts direct JSON and dry-runs without network", async () => {
 		expect(

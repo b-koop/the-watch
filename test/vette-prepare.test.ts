@@ -67,6 +67,18 @@ describe("prepare", () => {
 		}
 	});
 
+	it("leaves a run sidecar the comment poster can find on its own", async () => {
+		// Anchoring comments to the reviewed commit must not depend on the
+		// caller remembering to pass a flag.
+		const manifest = await prepare({ regression: false }, repo);
+		const run = JSON.parse(readFileSync(manifest.runPath, "utf8"));
+
+		expect(manifest.runPath).toContain(manifest.runDir);
+		expect(run.label).toBe(manifest.label);
+		// The sidecar stays slim: duplicating the bundle per run buys nothing.
+		expect(run.bundleText).toBeUndefined();
+	});
+
 	it("writes a bundle file fenced as untrusted content", async () => {
 		const manifest = await prepare({ regression: false }, repo);
 		const bundle = readFileSync(manifest.bundlePath, "utf8");

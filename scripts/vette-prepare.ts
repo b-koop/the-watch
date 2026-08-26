@@ -182,6 +182,8 @@ export type PrepareManifest = {
 	mode: VettePrepareMode;
 	label: string;
 	runDir: string;
+	/** Slim sidecar with the reviewed commit, for the comment poster. */
+	runPath: string;
 	prNumber?: number;
 	prUrl?: string;
 	secondCleanCheck: string[];
@@ -256,6 +258,12 @@ export async function prepare(
 		0,
 	);
 
+	// A slim sidecar the poster can find on its own, so anchoring comments to
+	// the reviewed commit does not depend on the caller remembering a flag.
+	// Deliberately not the whole manifest: that carries the bundle and every
+	// chunk, and duplicating hundreds of KB per run buys nothing here.
+	const runPath = join(runDir, "run.json");
+
 	const mode: VettePrepareMode =
 		args.mode ??
 		(target?.reviewMode === "repair"
@@ -263,6 +271,22 @@ export async function prepare(
 			: target?.reviewMode === "doc"
 				? "doc"
 				: "comment");
+
+	writeFileSync(
+		runPath,
+		JSON.stringify(
+			{
+				label,
+				mode,
+				...(target?.prNumber ? { prNumber: target.prNumber } : {}),
+				...(bundle.headSha ? { headSha: bundle.headSha } : {}),
+				...(bundle.baseSha ? { baseSha: bundle.baseSha } : {}),
+			},
+			null,
+			2,
+		),
+		"utf8",
+	);
 
 	return {
 		bundlePath,
@@ -285,6 +309,7 @@ export async function prepare(
 		mode,
 		label,
 		runDir,
+		runPath,
 		...(target?.prNumber ? { prNumber: target.prNumber } : {}),
 		...(target?.prUrl ? { prUrl: target.prUrl } : {}),
 		secondCleanCheck: SECOND_CLEAN_CHECK.filter((name) =>
