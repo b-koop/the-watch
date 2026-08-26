@@ -62,6 +62,93 @@ published package would also need the `smart-model-run` dependency resolvable.
 Requirements: Node 18+ (24 recommended), `gh` authenticated, and the `Workflow`
 tool available.
 
+## Claude Code runtime
+
+A `/vette` run under Claude Code is three phases. The skill
+(`skills/vette/SKILL.md`) owns phases 1 and 3; phase 2 is the deterministic
+workflow in `workflows/vette-lanes.js`.
+
+### 1. Prepare
+
+Workflow scripts have no filesystem access, so the diff bundle and reviewer
+selection are built first, in Bash:
+
+```bash
+node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/vette-prepare.ts" \
+  [selector] [--mode comment|repair|doc] [--regression] [--model haiku|sonnet|opus|fable]
+```
+
+`selector` is a PR number, branch, or URL; omit it to review the current
+worktree. The script runs against the repository being reviewed and prints a
+JSON manifest. Two non-zero exits are deliberate refusals, not failures to work
+around:
+
+- **Empty diff** — reviewing nothing is what produced hallucinated findings
+  before the gate existed.
+- **No matching reviewer** — nothing in the change is in scope for any lane.
+
+The manifest carries the diff inline as `bundleText` rather than as a path, and
+assigns every lane its model tier alongside `verifyModel` and `synthesisModel`.
+It is handed to the workflow verbatim.
+
+### 2. Fan out
+
+```
+Workflow({ name: "watch:vette-lanes", args: <the manifest object> })
+```
+
+(plain `vette-lanes` when loaded from a project's own `.claude/workflows/`).
+
+Every lane prompt opens with the identical bundle block — typically ~98% of the
+prompt — so all lanes share one cacheable prefix. A cache entry only exists once
+the first request writing it completes, so the workflow runs one lane alone to
+prime the prefix and then fans the rest out against a warm cache: one lane's
+latency up front instead of re-sending the diff once per lane. The bundle is
+embedded rather than read from disk for the same reason — a file read arrives as
+a tool result and shares no prefix at all.
+
+Findings then pass three gates before they can become a comment:
+
+1. **Grounding** — a finding that does not name a file in the changed set is
+   discarded, and the count is reported back as `droppedUngrounded`.
+2. **Adversarial verification** — one verifier per finding, prompted to refute
+   it and defaulting to `real=false` when the evidence does not hold up.
+   Pre-existing behavior, speculative concerns, and claims the cited code does
+   not actually support are rejected here.
+3. **Dedupe and synthesis** — survivors merge by file, line, and normalized
+   title, keeping the highest-confidence instance. Lanes that independently
+   reached the same conclusion raise confidence rather than producing two
+   comments.
+
+Lanes flagged for a second clean check re-run once with an independent agent
+when the first pass returns nothing, so a lane cannot go quiet by accident.
+
+The workflow returns `{ confirmed, comments, droppedUngrounded, laneStats,
+clean }`. `clean: true` means every finding was ungrounded or refuted — that is
+a successful review, not a failure. Because it runs one agent per lane plus one
+verifier per finding, a real PR exceeds the usual 15-agent guideline by design.
+
+### 3. Act
+
+`manifest.mode` is `repair` for a PR that local commit evidence says is yours and
+`comment` otherwise; explicit flags override it.
+
+| Mode | Trigger | Behavior |
+| --- | --- | --- |
+| comment | default, someone else's PR | Post the verified comments |
+| dry run | `--no-post` / `--dry-run` | Render locally, post nothing |
+| repair | `self`, or an owned PR | Fix confirmed findings in the working tree — no commit, no push, no comments |
+| comments-only | `--comments-only` (CI) | Post comments and nothing else |
+
+`--comments-only` and `self` are mutually exclusive. Posting always goes through
+`scripts/post-vette-comments.ts` — never a hand-written `gh api` call — which
+validates the whole array before the first network call and falls back exact
+line → file → general per comment. Repairs happen in the main turn rather than
+in workflow agents, because parallel agents editing one working tree conflict.
+
+Full contracts: [`skills/vette/references/modes.md`](skills/vette/references/modes.md)
+and [`skills/vette/references/comment-contract.md`](skills/vette/references/comment-contract.md).
+
 ## Publish to npm
 
 Publishing is automatic for pushes to `main` through
@@ -346,7 +433,9 @@ Use `/vette reviewers` to inspect discovery without running hooks or agents.
 
 - [GitHub CLI](https://cli.github.com/) authenticated via `gh auth login`
 - A git checkout on a named branch
-- Pi with extension support
+- Node 18+ (24 recommended)
+- One of: pi with extension support, or Claude Code with the `Workflow` tool
+  available
 
 ## Safety
 
@@ -355,6 +444,10 @@ Use `/vette reviewers` to inspect discovery without running hooks or agents.
 - Scope mode never posts or creates tickets — local Markdown drafts only.
 - Owner PR repairs preserve pre-existing dirty worktree changes.
 - Non-trivial fixes are delegated to focused subagents.
+- Under Claude Code, findings must survive grounding against the changed-file
+  set and an adversarial verifier before they can be posted or fixed.
+- `comments-only` runs are enforced at the harness level, not only by prompt:
+  `Edit` and `Write` are withheld from the tool allowlist.
 
 ## License
 
