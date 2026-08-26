@@ -4,3 +4,5 @@ graphify-out/
 .rpiv/
 .fallow/
 *.tgz
+.claude/
+.pi/
