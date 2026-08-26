@@ -99,87 +99,137 @@ function fakeContext(
 	} as unknown as ExtensionCommandContext;
 }
 
+/** The commit `git fetch origin pull/N/head` lands on in these fakes. */
+const PR_HEAD_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
 function fakeExec(): ExtensionAPI["exec"] {
-	return vi.fn(async (command: string, args: string[]) => {
-		const joined = args.join(" ");
-		if (command === "linear" && joined === "issue id") {
-			return { code: 0, stdout: "ENG-123\n", stderr: "", killed: false };
-		}
-		if (command === "linear" && joined === "issue view ENG-123") {
-			return {
-				code: 0,
-				stdout:
-					"ENG-123 Add beta review\nAcceptance criteria:\n- Show requirements gaps\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (command === "git" && joined.startsWith("ls-files")) {
-			return {
-				code: 0,
-				stdout: "features/watch-review.feature\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (
-			command === "git" &&
-			joined === "show HEAD:features/watch-review.feature"
-		) {
-			return {
-				code: 0,
-				stdout:
-					"Feature: Watch review\n\n  Scenario: Changed watch behavior is reviewed\n    Given changed watch behavior\n    When vette reviews the branch\n    Then behavior gaps are reported\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (command === "gh" && joined.includes("--name-only")) {
-			return {
-				code: 0,
-				stdout: "extensions/pr-vette.ts\nextensions/vette-beta.ts\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (command === "gh" && joined.includes("--patch")) {
-			return {
-				code: 0,
-				stdout:
-					"diff --git a/extensions/pr-vette.ts b/extensions/pr-vette.ts\n+beta\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (joined.startsWith("merge-base")) {
-			return { code: 0, stdout: "base\n", stderr: "", killed: false };
-		}
-		if (joined.includes("--name-status")) {
-			return {
-				code: 0,
-				stdout: "M\textensions/gh-status/watch.ts\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (joined.includes("--stat")) {
-			return {
-				code: 0,
-				stdout: " watch.ts | 1 +\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		if (joined.includes("--unified=80")) {
-			return {
-				code: 0,
-				stdout: "diff --git a/watch.ts b/watch.ts\n+change\n",
-				stderr: "",
-				killed: false,
-			};
-		}
-		return { code: 1, stdout: "", stderr: "unexpected", killed: false };
-	}) as unknown as ExtensionAPI["exec"];
+	return vi.fn(
+		async (command: string, args: string[], options?: { cwd?: string }) => {
+			const joined = args.join(" ");
+			// The PR review path builds its net diff inside a detached worktree.
+			const inPrWorktree = Boolean(options?.cwd?.includes("pi-vette-pr-"));
+			if (command === "git" && joined.startsWith("fetch origin pull/")) {
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			if (command === "git" && joined === "rev-parse FETCH_HEAD") {
+				return {
+					code: 0,
+					stdout: `${PR_HEAD_SHA}\n`,
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (command === "git" && joined.startsWith("worktree ")) {
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			}
+			if (inPrWorktree && joined.includes("--name-status")) {
+				return {
+					code: 0,
+					stdout: "M\textensions/pr-vette.ts\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (inPrWorktree && joined.includes("--stat")) {
+				return {
+					code: 0,
+					stdout: " pr-vette.ts | 2 +-\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (inPrWorktree && joined.includes("--unified=80")) {
+				return {
+					code: 0,
+					stdout:
+						"diff --git a/extensions/pr-vette.ts b/extensions/pr-vette.ts\n+net\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (command === "linear" && joined === "issue id") {
+				return { code: 0, stdout: "ENG-123\n", stderr: "", killed: false };
+			}
+			if (command === "linear" && joined === "issue view ENG-123") {
+				return {
+					code: 0,
+					stdout:
+						"ENG-123 Add beta review\nAcceptance criteria:\n- Show requirements gaps\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (command === "git" && joined.startsWith("ls-files")) {
+				return {
+					code: 0,
+					stdout: "features/watch-review.feature\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (
+				command === "git" &&
+				joined === "show HEAD:features/watch-review.feature"
+			) {
+				return {
+					code: 0,
+					stdout:
+						"Feature: Watch review\n\n  Scenario: Changed watch behavior is reviewed\n    Given changed watch behavior\n    When vette reviews the branch\n    Then behavior gaps are reported\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (command === "gh" && joined.includes("--name-only")) {
+				return {
+					code: 0,
+					stdout: "extensions/pr-vette.ts\nextensions/vette-beta.ts\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (
+				command === "gh" &&
+				joined.startsWith("pr diff") &&
+				!joined.includes("--name-only")
+			) {
+				return {
+					code: 0,
+					stdout:
+						"diff --git a/extensions/pr-vette.ts b/extensions/pr-vette.ts\n+beta\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (joined.startsWith("merge-base")) {
+				return { code: 0, stdout: "base\n", stderr: "", killed: false };
+			}
+			if (joined.includes("--name-status")) {
+				return {
+					code: 0,
+					stdout: "M\textensions/gh-status/watch.ts\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (joined.includes("--stat")) {
+				return {
+					code: 0,
+					stdout: " watch.ts | 1 +\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			if (joined.includes("--unified=80")) {
+				return {
+					code: 0,
+					stdout: "diff --git a/watch.ts b/watch.ts\n+change\n",
+					stderr: "",
+					killed: false,
+				};
+			}
+			return { code: 1, stdout: "", stderr: "unexpected", killed: false };
+		},
+	) as unknown as ExtensionAPI["exec"];
 }
 
 describe("vette beta startup status", () => {
@@ -1457,7 +1507,7 @@ describe("vette beta review integration", () => {
 		expect(bundle.changedPaths).toContain("extensions/gh-status/watch.ts");
 	});
 
-	it("uses gh pr diff for a selected PR target", async () => {
+	it("diffs a PR target against its merge base in a local worktree", async () => {
 		const exec = fakeExec();
 		const bundle = await buildVetteBetaDiffBundle({
 			exec,
@@ -1472,15 +1522,71 @@ describe("vette beta review integration", () => {
 		});
 
 		expect(bundle.text).toContain("Target: PR #123");
-		expect(bundle.text).toContain("Range: gh pr diff 123");
 		expect(bundle.text).toContain("extensions/pr-vette.ts");
 		expect(bundle.text).toContain("diff --git a/extensions/pr-vette.ts");
 		expect(bundle.changedPaths).toContain("extensions/pr-vette.ts");
+		// The net diff, not the commit patch series: a PR that reimplements a
+		// file mid-branch must not ship the intermediate version to the lanes.
+		expect(bundle.text).toContain(`Range: local worktree base..${PR_HEAD_SHA}`);
 		expect(vi.mocked(exec)).toHaveBeenCalledWith(
-			"gh",
-			["pr", "diff", "123", "--patch"],
+			"git",
+			expect.arrayContaining(["diff", "--unified=80", "base", PR_HEAD_SHA]),
 			expect.any(Object),
 		);
+		expect(vi.mocked(exec)).not.toHaveBeenCalledWith(
+			"gh",
+			expect.arrayContaining(["--patch"]),
+			expect.any(Object),
+		);
+	});
+
+	it("pins the fetched commit instead of checking out the mutable FETCH_HEAD", async () => {
+		const exec = fakeExec();
+		await buildVetteBetaDiffBundle({
+			exec,
+			cwd: "/repo",
+			target: {
+				label: "PR #123",
+				headRef: "feature/demo",
+				baseRef: "origin/main",
+				prNumber: 123,
+				prUrl: "https://github.com/o/r/pull/123",
+			},
+		});
+
+		// FETCH_HEAD is a single repo-global ref, so any concurrent fetch
+		// repoints it between the fetch and the checkout. Resolving it to an
+		// object id first is what keeps the review on the intended commit.
+		const worktreeAdd = vi
+			.mocked(exec)
+			.mock.calls.find(([command, args]) => command === "git" && args[0] === "worktree");
+		expect(worktreeAdd?.[1]).toEqual([
+			"worktree",
+			"add",
+			"--detach",
+			expect.any(String),
+			PR_HEAD_SHA,
+		]);
+		expect(worktreeAdd?.[1]).not.toContain("FETCH_HEAD");
+	});
+
+	it("exposes the reviewed commit so verifiers do not read the working tree", async () => {
+		const exec = fakeExec();
+		const bundle = await buildVetteBetaDiffBundle({
+			exec,
+			cwd: "/repo",
+			target: {
+				label: "PR #123",
+				headRef: "feature/demo",
+				baseRef: "origin/main",
+				prNumber: 123,
+				prUrl: "https://github.com/o/r/pull/123",
+			},
+		});
+
+		expect(bundle.headSha).toBe(PR_HEAD_SHA);
+		expect(bundle.baseSha).toBe("base");
+		expect(bundle.text).toContain(`Head commit: ${PR_HEAD_SHA}`);
 	});
 
 	it("builds a diff bundle for a selected branch target", async () => {
@@ -1542,6 +1648,116 @@ describe("vette beta review integration", () => {
 			expect.arrayContaining(["merge-base", "origin/develop", "HEAD"]),
 			expect.any(Object),
 		);
+	});
+});
+
+/** An exec whose branch diff is `fileCount` files of roughly `perFile` chars. */
+function bigDiffExec(fileCount: number, perFile: number): ExtensionAPI["exec"] {
+	const files = Array.from({ length: fileCount }, (_, i) => `src/f${i}.ts`);
+	const diff = files
+		.map(
+			(path) =>
+				`diff --git a/${path} b/${path}\n@@\n${"+line of changed code\n".repeat(
+					Math.ceil(perFile / 22),
+				)}`,
+		)
+		.join("");
+	return vi.fn(async (command: string, args: string[]) => {
+		const joined = args.join(" ");
+		if (command !== "git") {
+			return { code: 1, stdout: "", stderr: "no", killed: false };
+		}
+		if (joined.startsWith("merge-base")) {
+			return { code: 0, stdout: "base\n", stderr: "", killed: false };
+		}
+		if (joined.includes("--name-status")) {
+			return {
+				code: 0,
+				stdout: files.map((p) => `M\t${p}`).join("\n"),
+				stderr: "",
+				killed: false,
+			};
+		}
+		if (joined.includes("--stat")) {
+			return { code: 0, stdout: " changes\n", stderr: "", killed: false };
+		}
+		if (joined.includes("--unified=80")) {
+			return { code: 0, stdout: diff, stderr: "", killed: false };
+		}
+		return { code: 1, stdout: "", stderr: "unexpected", killed: false };
+	}) as unknown as ExtensionAPI["exec"];
+}
+
+const bigDiffTarget = {
+	label: "branch big",
+	headRef: "feature/big",
+	baseRef: "origin/main",
+};
+
+describe("oversized diffs", () => {
+	it("carries the whole diff instead of cutting it off at 35K", async () => {
+		// The cut used to drop 127K of a 162K diff, leaving lanes ~21% of the
+		// change and a changed-file list naming files they could not see.
+		const bundle = await buildVetteBetaDiffBundle({
+			exec: bigDiffExec(40, 4_000),
+			cwd: "/repo",
+			target: bigDiffTarget,
+		});
+
+		expect(bundle.text).not.toContain("[truncated");
+		expect(bundle.text.length).toBeGreaterThan(100_000);
+		// The last file is the one a head-slice would have silently eaten.
+		expect(bundle.text).toContain("diff --git a/src/f39.ts");
+	});
+
+	it("gives every changed file a patch some lane will actually read", async () => {
+		const bundle = await buildVetteBetaDiffBundle({
+			exec: bigDiffExec(40, 4_000),
+			cwd: "/repo",
+			target: bigDiffTarget,
+		});
+
+		const covered = new Set(bundle.chunks.flatMap((chunk) => chunk.paths));
+		for (const path of bundle.changedPaths) expect(covered).toContain(path);
+	});
+
+	it("splits into lane work units only once the diff is genuinely large", async () => {
+		const bundle = await buildVetteBetaDiffBundle({
+			exec: bigDiffExec(40, 4_000),
+			cwd: "/repo",
+			target: bigDiffTarget,
+		});
+
+		expect(bundle.chunks.length).toBeGreaterThan(1);
+		const seen = new Set<string>();
+		for (const chunk of bundle.chunks) {
+			for (const path of chunk.paths) {
+				expect(seen).not.toContain(path);
+				seen.add(path);
+			}
+		}
+	});
+
+	it("keeps an ordinary PR-sized diff as a single work unit", async () => {
+		// ~98K, the size that triggered this work. One chunk means one fan-out
+		// and one shared cache prefix, exactly as before chunking existed.
+		const bundle = await buildVetteBetaDiffBundle({
+			exec: bigDiffExec(20, 4_900),
+			cwd: "/repo",
+			target: bigDiffTarget,
+		});
+
+		expect(bundle.chunks).toHaveLength(1);
+	});
+
+	it("refuses a pathological diff rather than silently reviewing part of it", async () => {
+		await expect(
+			buildVetteBetaDiffBundle({
+				exec: bigDiffExec(120, 20_000),
+				cwd: "/repo",
+				target: bigDiffTarget,
+			}),
+		).rejects.toThrow(/Refusing to review a truncated bundle/);
 	});
 });
 

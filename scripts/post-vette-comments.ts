@@ -34,6 +34,8 @@ type CliArgs = {
 	file?: string;
 	stdin: boolean;
 	dryRun: boolean;
+	/** The commit the review actually read, from the prepare manifest. */
+	headSha?: string;
 };
 
 export function parsePostCommentArgs(argv: string[]): CliArgs {
@@ -43,6 +45,7 @@ export function parsePostCommentArgs(argv: string[]): CliArgs {
 		if (token === "--pr" || token === "--selector") result.selector = argv[++i];
 		else if (token === "--json") result.json = argv[++i];
 		else if (token === "--file") result.file = argv[++i];
+		else if (token === "--head-sha") result.headSha = argv[++i];
 		else if (token === "--stdin") result.stdin = true;
 		else if (token === "--dry-run" || token === "--validate")
 			result.dryRun = true;
@@ -88,6 +91,8 @@ type PullRequestMetadataJson = {
 export function parsePullRequestMetadata(
 	input: string,
 	repository: string,
+	/** The commit the review actually read, when prepare pinned one. */
+	headSha?: string,
 ): ReviewCommentPostMetadata {
 	let value: Pick<PullRequestMetadataJson, "number" | "headRefOid">;
 	try {
@@ -105,7 +110,10 @@ export function parsePullRequestMetadata(
 		);
 	return {
 		pullRequest: value.number,
-		commitId: value.headRefOid,
+		// Anchor comments to the commit the review read, not to whatever the PR
+		// head is now. A push between prepare and post would otherwise attach
+		// findings to code no lane ever looked at.
+		commitId: headSha ?? value.headRefOid,
 		repository,
 	};
 }
@@ -124,6 +132,7 @@ function repositoryFromSelector(selector: string): string | undefined {
 
 async function resolveMetadata(
 	selector: string,
+	headSha?: string,
 ): Promise<ReviewCommentPostMetadata> {
 	let prResult: { stdout: string };
 	try {
@@ -161,7 +170,11 @@ async function resolveMetadata(
 			);
 		}
 	}
-	return parsePullRequestMetadata(String(prResult.stdout), repository ?? "");
+	return parsePullRequestMetadata(
+		String(prResult.stdout),
+		repository ?? "",
+		headSha,
+	);
 }
 
 export async function runPostVetteComments(
@@ -194,7 +207,7 @@ export async function runPostVetteComments(
 		}
 		if (!args.selector)
 			throw new Error("A pull-request selector is required for posting");
-		const metadata = await resolveMetadata(args.selector);
+		const metadata = await resolveMetadata(args.selector, args.headSha);
 		const results = await postReviewComments(comments, metadata);
 		process.stdout.write(JSON.stringify({ metadata, results }, null, 2) + "\n");
 		if (!results.every((result) => result.ok)) {

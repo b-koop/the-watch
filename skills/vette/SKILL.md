@@ -31,12 +31,27 @@ being reviewed; it reads that repo's git state, not the plugin's.
 worktree. The script prints a JSON manifest and exits non-zero if there is
 nothing to review.
 
-The manifest carries the diff inline as `bundleText`, not just a path. Every lane
-prompt opens with that same block verbatim, so the lanes share one cacheable
-prefix — typically ~98% of each prompt — and the diff is billed at full rate once
-instead of once per lane. Pass the manifest straight through; do not trim
-`bundleText` out of it, and do not rewrite lane prompts to read the bundle from
-disk (a file read arrives as a tool result and shares no prefix).
+The manifest carries the diff inline, not just a path. Lane prompts open with
+`chunks[i].text` verbatim, so every lane on a given chunk shares one cacheable
+prefix — typically ~98% of each prompt — and that diff is billed at full rate
+once instead of once per lane. Pass the manifest straight through; do not trim
+the chunk text or `bundleText` out of it, and do not rewrite lane prompts to read
+the bundle from disk (a file read arrives as a tool result and shares no prefix).
+
+`chunks` is the lane work-unit list. An ordinary PR is a **single chunk** whose
+text is `bundleText` verbatim, so the common path is one fan-out over one shared
+prefix. Only a genuinely oversized diff splits into several, at file boundaries;
+lanes then run once per chunk and each chunk is primed separately. The diff is
+never truncated — a run past the ceiling fails loudly instead, because reviewing
+a fraction of a diff while claiming to have reviewed it is worse than not
+running.
+
+The manifest also carries `headSha` and `baseSha` when the PR diff could be
+pinned. That commit — not the working tree — is what verifiers check findings
+against, and what the poster anchors comments to. Without it, a verifier sitting
+on an unrelated branch reports real PR code as "does not exist anywhere in the
+repo", and comments land on whatever got pushed since. Pass both through, and
+pass `--head-sha <manifest.headSha>` to the poster.
 
 The manifest also assigns each lane a model tier, and carries `verifyModel` and
 `synthesisModel` for the other two stages. Nothing inherits the session model:
@@ -79,9 +94,11 @@ It returns `{ confirmed, comments, droppedUngrounded, laneStats, clean }`.
 finding was either ungrounded or refuted during verification — that is a
 successful review, not a failure.
 
-The workflow runs one agent per lane plus one verifier per finding, so a real PR
-will exceed the usual 15-agent guideline. That is deliberate: lane coverage is
-the point, and each verifier is what keeps plausible-but-wrong findings out.
+The workflow runs one agent per lane per chunk, plus one verifier per finding, so
+a real PR will exceed the usual 15-agent guideline. That is deliberate: lane
+coverage is the point, and each verifier is what keeps plausible-but-wrong
+findings out. A multi-chunk diff multiplies the lane count; the workflow logs the
+chunk count and the resulting agent total when that happens.
 
 ## Phase 3 — Act
 
@@ -134,10 +151,14 @@ before the first network call, then falls back exact line → file → general
 placement per comment.
 
 ```bash
-node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts" --pr <n> --stdin <<'JSON'
+node --experimental-strip-types "${CLAUDE_PLUGIN_ROOT}/scripts/post-vette-comments.ts" --pr <n> --head-sha <manifest.headSha> --stdin <<'JSON'
 [ ...the comments array... ]
 JSON
 ```
+
+Pass `--head-sha` whenever the manifest has one. It anchors every comment to the
+commit the lanes actually read; without it the poster re-queries the PR head, and
+anything pushed since silently retargets the comments.
 
 Never call `gh api` yourself to post a finding, and never hand-write the
 Markdown — the renderer owns formatting.

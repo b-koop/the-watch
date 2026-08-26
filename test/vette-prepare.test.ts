@@ -50,6 +50,23 @@ describe("prepare", () => {
 		expect(manifest.reviewers.length).toBeGreaterThan(0);
 	});
 
+	it("emits one lane work unit for an ordinary change", async () => {
+		const manifest = await prepare({ regression: false }, repo);
+
+		expect(manifest.chunks).toHaveLength(1);
+		// The single-chunk prompt is the bundle verbatim, so the shared cache
+		// prefix is unchanged from before chunking existed.
+		expect(manifest.chunks[0].text).toBe(manifest.bundleText);
+	});
+
+	it("writes each work unit to disk beside the bundle", async () => {
+		const manifest = await prepare({ regression: false }, repo);
+
+		for (const chunk of manifest.chunks) {
+			expect(readFileSync(chunk.path, "utf8")).toBe(chunk.text);
+		}
+	});
+
 	it("writes a bundle file fenced as untrusted content", async () => {
 		const manifest = await prepare({ regression: false }, repo);
 		const bundle = readFileSync(manifest.bundlePath, "utf8");

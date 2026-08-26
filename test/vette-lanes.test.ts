@@ -44,9 +44,14 @@ const helpers = loadHelpers() as unknown as {
 	ground: (findings: unknown[], changedPaths: string[]) => unknown[];
 	findingKey: (finding: unknown) => string;
 	normalizeTitle: (title: unknown) => string;
-	lanePrompt: (reviewer: unknown, args: unknown, attempt: number) => string;
+	lanePrompt: (
+		reviewer: unknown,
+		args: unknown,
+		attempt: number,
+		chunk?: unknown,
+	) => string;
 	laneSuffix: (reviewer: unknown, attempt: number) => string;
-	sharedPrefix: (args: unknown) => string;
+	sharedPrefix: (args: unknown, chunk?: unknown) => string;
 	verifyPrompt: (finding: unknown, reviewer: unknown, args: unknown) => string;
 	meta: { name: string; phases: Array<{ title: string }> };
 	FINDINGS_SCHEMA: { properties: Record<string, unknown> };
@@ -218,6 +223,77 @@ describe("verify prompt", () => {
 		expect(prompt).toContain("REFUTE");
 		expect(prompt).toContain("Default to real=false");
 		expect(prompt).toContain("already present before this diff");
+	});
+
+	it("points the verifier at the reviewed commit, not the working tree", () => {
+		const prompt = helpers.verifyPrompt(
+			{ title: "t", severity: "blocker", file: "a.ts", line: 2 },
+			{ name: "correctness" },
+			{ bundlePath: "/tmp/run/bundle.md", headSha: "abc123", baseSha: "def456" },
+		);
+		expect(prompt).toContain("pinned at commit abc123");
+		expect(prompt).toContain("git show abc123:<path>");
+		expect(prompt).toContain("def456");
+	});
+
+	it("does not let a missing file alone refute a finding", () => {
+		// Verifiers reading a stale checkout previously refuted real findings as
+		// "does not exist anywhere in the repo".
+		const prompt = helpers.verifyPrompt(
+			{ title: "t", severity: "blocker", file: "a.ts", line: 2 },
+			{ name: "correctness" },
+			{ bundlePath: "/tmp/run/bundle.md", headSha: "abc123" },
+		);
+		expect(prompt).toContain("A file you cannot find is NOT a refutation");
+		expect(prompt).not.toContain("The file or line does not exist");
+	});
+
+	it("omits the pinned-commit guidance when no commit was resolved", () => {
+		const prompt = helpers.verifyPrompt(
+			{ title: "t", severity: "blocker", file: "a.ts", line: 2 },
+			{ name: "correctness" },
+			{ bundlePath: "/tmp/run/bundle.md" },
+		);
+		expect(prompt).not.toContain("pinned at commit");
+	});
+});
+
+describe("chunked lane prompts", () => {
+	const reviewer = { name: "correctness", prompt: "scope", body: "body" };
+	const base = {
+		bundlePath: "/tmp/run/bundle.md",
+		bundleText: "whole bundle",
+		changedPaths: ["a.ts", "b.ts"],
+		label: "PR #1",
+	};
+
+	it("reviews the chunk it was handed rather than the whole bundle", () => {
+		const prompt = helpers.lanePrompt(reviewer, base, 1, {
+			index: 2,
+			total: 3,
+			paths: ["b.ts"],
+			text: "chunk two diff",
+		} as never);
+		expect(prompt).toContain("chunk two diff");
+		expect(prompt).not.toContain("whole bundle");
+		expect(prompt).toContain("chunk 2 of 3");
+	});
+
+	it("falls back to the full bundle when there is no chunk", () => {
+		const prompt = helpers.lanePrompt(reviewer, base, 1);
+		expect(prompt).toContain("whole bundle");
+		expect(prompt).not.toContain("chunk ");
+	});
+
+	it("does not mention chunking when the diff is a single unit", () => {
+		const prompt = helpers.lanePrompt(reviewer, base, 1, {
+			index: 1,
+			total: 1,
+			paths: ["a.ts"],
+			text: "only chunk",
+		} as never);
+		expect(prompt).toContain("only chunk");
+		expect(prompt).not.toContain("chunk 1 of 1");
 	});
 });
 
@@ -426,14 +502,20 @@ describe("prompt caching structure", () => {
 
 describe("cache priming", () => {
 	it("runs one lane before fanning out so the rest hit a warm cache", () => {
-		expect(source).toContain(
-			"primed.set(primerLane.name, await reviewLane(primerLane))",
-		);
-		expect(source).toContain("args.reviewers.length > 1");
+		expect(source).toContain("primed.set(unitKey(primer), await reviewUnit(primer))");
+		expect(source).toContain("units.length > chunkList.length");
 	});
 
 	it("replays the primer's result rather than reviewing it twice", () => {
-		expect(source).toContain("primed.get(reviewer.name) ?? reviewLane(reviewer)");
+		expect(source).toContain("primed.get(unitKey(unit)) ?? reviewUnit(unit)");
+	});
+
+	it("primes once per chunk, since each chunk is its own cache prefix", () => {
+		const primeBlock = source.slice(
+			source.indexOf("if (units.length > chunkList.length)"),
+			source.indexOf("const perUnit"),
+		);
+		expect(primeBlock).toContain("for (const chunk of chunkList)");
 	});
 });
 

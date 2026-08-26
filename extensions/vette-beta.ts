@@ -188,7 +188,19 @@ const LOCAL_MODEL_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_LOCAL_VETTE_MODEL = "ollama/ornith:35b";
 export const DEFAULT_LOCAL_VETTE_MODELS = [...DEFAULT_LOCAL_FALLBACK_SELECTORS];
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
-const MAX_DIFF_CHARS = 35_000;
+/**
+ * A pathological-run guard, not a review cap. Lanes fan out over
+ * `LANE_CHUNK_CHARS` work units, so an oversized diff is chunked rather than
+ * cut; exceeding this ceiling is a hard error, because silently reviewing 21%
+ * of a diff is how lanes ended up reporting on code that was not there.
+ */
+const MAX_DIFF_CHARS = 2_000_000;
+/**
+ * Work-unit size for lane fan-out. Deliberately large: a typical PR is one
+ * chunk, so the common path keeps a single fan-out and its shared prompt-cache
+ * prefix. Multiplication only starts for genuinely oversized diffs.
+ */
+const LANE_CHUNK_CHARS = 120_000;
 const DEFAULT_DIFF_CHUNK_CHARS = 12_000;
 const MAX_CAPTURED_AGENT_OUTPUT_CHARS = 1_000_000;
 const MAX_PENDING_JSON_LINE_CHARS = 5_000_000;
@@ -2041,6 +2053,13 @@ type DiffParts = {
 	stat: string;
 	diff: string;
 	rangeLabel: string;
+	/**
+	 * The exact commit the diff was read from. Verifiers check findings against
+	 * this rather than the working tree, which may sit on an unrelated branch.
+	 */
+	headSha?: string;
+	/** Merge base, for "was this already broken before the PR?" comparisons. */
+	baseSha?: string;
 };
 
 async function buildLocalPrDiffParts(input: {
@@ -2058,31 +2077,47 @@ async function buildLocalPrDiffParts(input: {
 			["fetch", "origin", `pull/${input.prNumber}/head`],
 			DIFF_EXEC_TIMEOUT_MS,
 		);
+		// Resolve FETCH_HEAD to a real object id before anything else touches it.
+		// FETCH_HEAD is a single repo-global ref: any other fetch in this
+		// repository — a concurrent agent, a background tool, the user's own
+		// shell — repoints it, and checking out the name instead of the id is
+		// how a review previously ended up reading a completely different
+		// branch. Everything downstream pins to this id.
+		const headSha = (
+			await execText(input.exec, input.cwd, "git", ["rev-parse", "FETCH_HEAD"])
+		).trim();
 		await execText(
 			input.exec,
 			input.cwd,
 			"git",
-			["worktree", "add", "--detach", worktree, "FETCH_HEAD"],
+			["worktree", "add", "--detach", worktree, headSha],
 			DIFF_EXEC_TIMEOUT_MS,
 		);
-		const mergeBase = await execText(input.exec, worktree, "git", [
-			"merge-base",
-			input.baseRef,
-			"HEAD",
-		]);
+		const mergeBase = (
+			await execText(input.exec, worktree, "git", [
+				"merge-base",
+				input.baseRef,
+				headSha,
+			])
+		).trim();
 		const [status, stat, diff] = await Promise.all([
 			execText(input.exec, worktree, "git", [
 				"diff",
 				"--name-status",
 				mergeBase,
-				"HEAD",
+				headSha,
 			]),
-			execText(input.exec, worktree, "git", ["diff", "--stat", mergeBase, "HEAD"]),
+			execText(input.exec, worktree, "git", [
+				"diff",
+				"--stat",
+				mergeBase,
+				headSha,
+			]),
 			execText(
 				input.exec,
 				worktree,
 				"git",
-				["diff", "--unified=80", mergeBase, "HEAD"],
+				["diff", "--unified=80", mergeBase, headSha],
 				DIFF_EXEC_TIMEOUT_MS,
 			),
 		]);
@@ -2091,7 +2126,9 @@ async function buildLocalPrDiffParts(input: {
 			status,
 			stat,
 			diff,
-			rangeLabel: `local worktree ${mergeBase}..HEAD`,
+			rangeLabel: `local worktree ${mergeBase}..${headSha}`,
+			headSha,
+			baseSha: mergeBase,
 		};
 	} finally {
 		await execText(
@@ -2180,10 +2217,10 @@ async function buildPrDiffParts(input: {
 	// topic agents ended up reviewing hallucinated content.
 	let diff = "";
 	let lastDiffError: unknown;
-	for (const args of [
-		["pr", "diff", selector, "--patch"],
-		["pr", "diff", selector],
-	]) {
+	// Bare `gh pr diff` is the net diff. `--patch` returns the commit patch
+	// series instead, which still contains code the branch later deleted or
+	// reimplemented — lanes reviewed ~200 lines of a removed file that way.
+	for (const args of [["pr", "diff", selector]]) {
 		try {
 			diff = await execText(
 				input.exec,
@@ -2285,6 +2322,22 @@ export type VetteBetaDiffBundle = {
 	text: string;
 	changedPaths: string[];
 	isEmpty: boolean;
+	/**
+	 * Lane work units, split on file boundaries. A typical PR yields exactly
+	 * one; only oversized diffs produce several, and lanes fan out over them
+	 * instead of reviewing a truncated head-slice.
+	 */
+	chunks: VetteBetaDiffChunk[];
+	/**
+	 * Everything in the bundle except the diff body — headers, changed files,
+	 * requirements, behavior specs. Prefixed onto each chunk so a fanned-out
+	 * lane keeps the context the single-chunk case gets for free.
+	 */
+	contextText: string;
+	/** The commit the diff was read from, when it could be pinned. */
+	headSha?: string;
+	/** Merge base the diff was taken against, when known. */
+	baseSha?: string;
 };
 
 export async function buildVetteBetaDiffBundle(input: {
@@ -2324,14 +2377,21 @@ export async function buildVetteBetaDiffBundle(input: {
 	const repo =
 		input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.repo : undefined;
 	let localPrDiffParts: DiffParts | undefined;
-	if (input.target?.regression && input.target.prNumber) {
+	if (input.target?.prNumber) {
+		// The local worktree diff is the only path that produces a true net
+		// diff at full context and yields a pinnable head sha. `gh pr diff`
+		// stays as a fallback for when the fetch is not possible (offline, no
+		// permission to fetch the pull ref), but it is no longer the default.
 		localPrDiffParts = await buildLocalPrDiffParts({
 			exec: input.exec,
 			cwd: input.cwd,
 			prNumber: input.target.prNumber,
 			baseRef,
+		}).catch((error: unknown) => {
+			if (input.target?.regression) throw error;
+			return undefined;
 		});
-		if (!localPrDiffParts) {
+		if (!localPrDiffParts && input.target.regression) {
 			throw new VetteBetaDiffError(
 				`local worktree diff for PR #${input.target.prNumber} was empty or could not be built. Refusing to fall back to a remote/API diff in regression mode.`,
 			);
@@ -2463,6 +2523,15 @@ export async function buildVetteBetaDiffBundle(input: {
 				"Compare code movement/renames against test movement and flag behavior changes whose tests were not moved or expanded.",
 			].join("\n")
 		: "";
+	if (diff.length > MAX_DIFF_CHARS) {
+		throw new VetteBetaDiffError(
+			`diff is ${diff.length} chars, past the ${MAX_DIFF_CHARS} ceiling. Refusing to review a truncated bundle — narrow the review target.`,
+		);
+	}
+	// Work units for lane fan-out. `chunkDiffByFiles` flushes before appending,
+	// so a single very large file stays whole in one oversized chunk; that is
+	// the case `laneModel` escalates off.
+	const laneChunks = chunkDiffByFiles(diff, LANE_CHUNK_CHARS);
 	const diffChunks = chunkDiffByFiles(diff);
 	const chunkContext =
 		diffChunks.length > 1
@@ -2474,7 +2543,7 @@ export async function buildVetteBetaDiffBundle(input: {
 					),
 				].join("\n")
 			: "";
-	const text = [
+	const contextLines = [
 		`Repository: ${input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.repo.fullName : "<unknown>"}`,
 		`Target: ${input.target?.label ?? (requestedHeadRef === "HEAD" ? "current worktree" : requestedHeadRef)}`,
 		`Branch: ${input.target?.headRef ?? (input.snapshot?.repo.kind === "repo" ? input.snapshot.repo.branch : "<unknown>")}`,
@@ -2485,6 +2554,8 @@ export async function buildVetteBetaDiffBundle(input: {
 				: "PR: <none>",
 		`Base: ${baseRef}`,
 		`Range: ${rangeLabel}`,
+		`Head commit: ${prDiffParts?.headSha ?? headRef}`,
+		`Base commit: ${prDiffParts?.baseSha ?? (mergeBase || "<unknown>")}`,
 		"",
 		"Changed files:",
 		status || "<none>",
@@ -2499,10 +2570,18 @@ export async function buildVetteBetaDiffBundle(input: {
 		regressionContext,
 		chunkContext,
 		"",
-		"Diff:",
-		truncateText(diff || "<empty diff>", MAX_DIFF_CHARS),
-	].join("\n");
-	return { text, changedPaths, isEmpty };
+	];
+	const contextText = contextLines.join("\n");
+	const text = [contextText, "Diff:", diff || "<empty diff>"].join("\n");
+	return {
+		text,
+		contextText,
+		changedPaths,
+		isEmpty,
+		chunks: laneChunks,
+		...(prDiffParts?.headSha ? { headSha: prDiffParts.headSha } : {}),
+		...(prDiffParts?.baseSha ? { baseSha: prDiffParts.baseSha } : {}),
+	};
 }
 
 export function topicsFromReviewers(

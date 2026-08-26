@@ -133,6 +133,15 @@ function slug(value: string): string {
 	return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "worktree";
 }
 
+export type PrepareChunk = {
+	index: number;
+	paths: string[];
+	/** The wrapped chunk diff inline, for the lane prompt. */
+	text: string;
+	/** On-disk copy, for verifiers that want to grep it. */
+	path: string;
+};
+
 export type PrepareManifest = {
 	bundlePath: string;
 	/**
@@ -143,6 +152,19 @@ export type PrepareManifest = {
 	 */
 	bundleText: string;
 	changedPaths: string[];
+	/**
+	 * Lane work units. Lanes fan out over these; a typical PR has exactly one,
+	 * so the common path is a single fan-out sharing one cacheable prefix.
+	 */
+	chunks: PrepareChunk[];
+	/**
+	 * The commit the diff was read from. Verifiers check findings against this
+	 * rather than the working tree, which may sit on an unrelated branch — that
+	 * mismatch previously made them refute real findings as "does not exist".
+	 */
+	headSha?: string;
+	/** Merge base, for "was this already broken before the PR?" checks. */
+	baseSha?: string;
 	reviewers: Array<{
 		name: string;
 		prompt: string;
@@ -207,6 +229,33 @@ export async function prepare(
 	const bundleText = wrapUntrustedContent("diff/context bundle", bundle.text);
 	writeFileSync(bundlePath, bundleText, "utf8");
 
+	const chunkCount = bundle.chunks.length;
+	const chunks = bundle.chunks.map((chunk) => {
+		const path = join(runDir, `chunk-${chunk.index}.md`);
+		// One chunk is the common case: reuse the bundle verbatim so the prompt
+		// is byte-identical to the unchunked run and the shared cache prefix is
+		// unchanged. Only a genuinely oversized diff pays for a rebuilt prefix.
+		const text =
+			chunkCount === 1
+				? bundleText
+				: wrapUntrustedContent(
+						`diff/context bundle (chunk ${chunk.index} of ${chunkCount})`,
+						[
+							bundle.contextText,
+							`Diff (chunk ${chunk.index} of ${chunkCount} — this lane reviews only these files: ${chunk.paths.join(", ")}):`,
+							chunk.text,
+						].join("\n"),
+					);
+		writeFileSync(path, text, "utf8");
+		return { index: chunk.index, paths: chunk.paths, text, path };
+	});
+	// A lane reads one chunk, not the whole bundle, so its tier follows the
+	// largest chunk it could be handed rather than the total.
+	const laneChars = chunks.reduce(
+		(largest, chunk) => Math.max(largest, chunk.text.length),
+		0,
+	);
+
 	const mode: VettePrepareMode =
 		args.mode ??
 		(target?.reviewMode === "repair"
@@ -219,12 +268,15 @@ export async function prepare(
 		bundlePath,
 		bundleText,
 		changedPaths: bundle.changedPaths,
+		chunks,
+		...(bundle.headSha ? { headSha: bundle.headSha } : {}),
+		...(bundle.baseSha ? { baseSha: bundle.baseSha } : {}),
 		reviewers: catalog.selected.map((reviewer) => ({
 			name: reviewer.name,
 			prompt: reviewer.selector ?? reviewer.description,
 			body: reviewer.body,
 			effort: LANE_EFFORT[reviewer.name] ?? "medium",
-			model: args.model ?? laneModel(reviewer.name, bundleText.length),
+			model: args.model ?? laneModel(reviewer.name, laneChars),
 			priority: reviewer.priority,
 			matchReason: reviewer.matchReason,
 		})),

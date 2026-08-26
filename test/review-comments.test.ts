@@ -123,6 +123,27 @@ describe("post-vette-comments PR metadata", () => {
 			repository: "owner/repo",
 		});
 	});
+
+	it("anchors comments to the reviewed commit, not the current head", () => {
+		// A push between prepare and post would otherwise attach findings to
+		// code no lane ever read.
+		expect(
+			parsePullRequestMetadata(
+				JSON.stringify({ number: 7, headRefOid: "pushed-since" }),
+				"owner/repo",
+				"reviewed",
+			),
+		).toMatchObject({ commitId: "reviewed" });
+	});
+
+	it("falls back to the current head when the run pinned no commit", () => {
+		expect(
+			parsePullRequestMetadata(
+				JSON.stringify({ number: 7, headRefOid: "abc" }),
+				"owner/repo",
+			),
+		).toMatchObject({ commitId: "abc" });
+	});
 });
 
 describe("post-vette-comments CLI", () => {
