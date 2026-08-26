@@ -282,9 +282,7 @@ describe("vette beta config", () => {
 		expect(qualityTopic?.prompt).toContain(
 			"dependency works inside an isolated test system",
 		);
-		expect(qualityTopic?.prompt).toContain(
-			"real implementation or simple fake",
-		);
+		expect(qualityTopic?.prompt).toContain("real implementation or simple fake");
 		expect(qualityTopic?.prompt).toContain("API calls");
 		expect(qualityTopic?.prompt).toContain("database access");
 		expect(qualityTopic?.prompt).toContain("components/web components");
@@ -403,9 +401,7 @@ describe("vette beta config", () => {
 			parseVetteBetaConfig(
 				JSON.stringify({
 					modelPools: {
-						light: [
-							{ model: "provider/remote", thinking: "medium", timeoutMs: 1 },
-						],
+						light: [{ model: "provider/remote", thinking: "medium", timeoutMs: 1 }],
 					},
 					vetteBeta: { modelPool: "light" },
 				}),
@@ -439,15 +435,11 @@ describe("vette beta config", () => {
 			],
 		});
 
-		expect(models.map((entry) => entry.model)).toContain(
-			"ollama/small-code:7b",
-		);
+		expect(models.map((entry) => entry.model)).toContain("ollama/small-code:7b");
 		expect(models.map((entry) => entry.model)).toContain(
 			"ollama/big-general:70b",
 		);
-		expect(models.map((entry) => entry.model)).not.toContain(
-			"openai/gpt-5-mini",
-		);
+		expect(models.map((entry) => entry.model)).not.toContain("openai/gpt-5-mini");
 		expect(
 			models.findIndex((entry) => entry.model === "ollama/big-general:70b"),
 		).toBeLessThan(
@@ -465,12 +457,8 @@ describe("vette beta config", () => {
 
 		expect(selection.remoteModel).toMatch(/gpt-4o-mini|mini|flash|haiku/i);
 		expect(selection.localModel).toContain("7b");
-		expect(selection.config.modelPools[selection.remotePoolName]).toHaveLength(
-			1,
-		);
-		expect(selection.config.modelPools[selection.localPoolName]).toHaveLength(
-			1,
-		);
+		expect(selection.config.modelPools[selection.remotePoolName]).toHaveLength(1);
+		expect(selection.config.modelPools[selection.localPoolName]).toHaveLength(1);
 	});
 
 	it("honors compare model overrides for remote and local legs", () => {
@@ -502,9 +490,9 @@ describe("vette beta config", () => {
 		expect(resolveCompareModelSelector("gpt-4o-mini", remote, "remote")).toBe(
 			"openai/gpt-4o-mini",
 		);
-		expect(
-			resolveCompareModelSelector("qwen2.5-coder:7b", local, "local"),
-		).toBe("ollama/qwen2.5-coder:7b");
+		expect(resolveCompareModelSelector("qwen2.5-coder:7b", local, "local")).toBe(
+			"ollama/qwen2.5-coder:7b",
+		);
 		expect(
 			formatVetteCompareModels({
 				remote,
@@ -1365,9 +1353,7 @@ describe("vette beta review integration", () => {
 			"Fallow may exit with status 1 when it successfully found audit items",
 		);
 		expect(prompt).toContain("exit 1 with usable findings/output");
-		expect(prompt).toContain(
-			"do not rerun it solely because the exit code is 1",
-		);
+		expect(prompt).toContain("do not rerun it solely because the exit code is 1");
 		expect(prompt).toContain("summarize why they were rejected");
 	});
 
@@ -1448,9 +1434,7 @@ describe("vette beta review integration", () => {
 
 		expect(prompt).toContain("Mode: owned/self repair");
 		expect(prompt).toContain("Do not post or draft PR review comments");
-		expect(prompt).toContain(
-			"fix confirmed issues directly in the working tree",
-		);
+		expect(prompt).toContain("fix confirmed issues directly in the working tree");
 		expect(prompt).not.toContain(
 			"post verified findings to https://github.com/o/r/pull/123",
 		);
@@ -1525,28 +1509,30 @@ describe("vette beta review integration", () => {
 		const inner = fakeExec();
 		// origin/HEAD says main, but the worktree branched off develop 2 commits
 		// ago while develop itself is 40 commits ahead of main.
-		const exec = vi.fn(async (command: string, args: string[], options: never) => {
-			const joined = args.join(" ");
-			if (command === "git") {
-				if (joined === "symbolic-ref refs/remotes/origin/HEAD --short")
-					return { code: 0, stdout: "origin/main\n", stderr: "", killed: false };
-				if (joined === "rev-parse --abbrev-ref HEAD")
-					return { code: 0, stdout: "feature/demo\n", stderr: "", killed: false };
-				if (args[0] === "rev-parse" && args[1] === "--verify") {
-					const ref = String(args[3]).replace(/\^\{commit\}$/, "");
-					return ["HEAD", "origin/main", "origin/develop"].includes(ref)
-						? { code: 0, stdout: `sha-${ref}\n`, stderr: "", killed: false }
-						: { code: 1, stdout: "", stderr: "unknown ref", killed: false };
+		const exec = vi.fn(
+			async (command: string, args: string[], options: never) => {
+				const joined = args.join(" ");
+				if (command === "git") {
+					if (joined === "symbolic-ref refs/remotes/origin/HEAD --short")
+						return { code: 0, stdout: "origin/main\n", stderr: "", killed: false };
+					if (joined === "rev-parse --abbrev-ref HEAD")
+						return { code: 0, stdout: "feature/demo\n", stderr: "", killed: false };
+					if (args[0] === "rev-parse" && args[1] === "--verify") {
+						const ref = String(args[3]).replace(/\^\{commit\}$/, "");
+						return ["HEAD", "origin/main", "origin/develop"].includes(ref)
+							? { code: 0, stdout: `sha-${ref}\n`, stderr: "", killed: false }
+							: { code: 1, stdout: "", stderr: "unknown ref", killed: false };
+					}
+					if (args[0] === "rev-list" && args[1] === "--count") {
+						const count = String(args[2]).includes("develop") ? "2" : "42";
+						return { code: 0, stdout: `${count}\n`, stderr: "", killed: false };
+					}
+					if (args[0] === "merge-base")
+						return { code: 0, stdout: `mb-${args[1]}\n`, stderr: "", killed: false };
 				}
-				if (args[0] === "rev-list" && args[1] === "--count") {
-					const count = String(args[2]).includes("develop") ? "2" : "42";
-					return { code: 0, stdout: `${count}\n`, stderr: "", killed: false };
-				}
-				if (args[0] === "merge-base")
-					return { code: 0, stdout: `mb-${args[1]}\n`, stderr: "", killed: false };
-			}
-			return inner(command, args, options);
-		}) as unknown as ExtensionAPI["exec"];
+				return inner(command, args, options);
+			},
+		) as unknown as ExtensionAPI["exec"];
 
 		const bundle = await buildVetteBetaDiffBundle({ exec, cwd: "/repo" });
 
@@ -1600,9 +1586,7 @@ describe("diff integrity and grounding", () => {
 				config: parseVetteBetaConfig(
 					JSON.stringify({
 						modelPools: {
-							light: [
-								{ model: "provider/light", thinking: "off", timeoutMs: 1 },
-							],
+							light: [{ model: "provider/light", thinking: "off", timeoutMs: 1 }],
 						},
 					}),
 				),
